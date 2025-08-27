@@ -4,7 +4,7 @@ use revm::context::TxEnv;
 
 pub const POD_CHAIN_ID: u64 = 10000000000;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct PodTransaction {
     // Fields for PodTransaction
 }
@@ -28,7 +28,7 @@ pub struct PodVote {
 
 #[derive(Debug)]
 pub struct PodDS {
-    pub tx_trace: PodTransactionTrace,
+    pub tx_trace: Vec<PodTransactionTrace>,
     pub r_perf: u64,
 }
 

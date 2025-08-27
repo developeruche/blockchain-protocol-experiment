@@ -1,11 +1,7 @@
 //! Utility functions for pod-core
 
-use alloy::signers::{Signature, Signer, SignerSync, k256::ecdsa::SigningKey, local::LocalSigner};
-
-use crate::primitives::{
-    errors::PodError,
-    pod::{POD_CHAIN_ID, PodTransaction},
-};
+use crate::primitives::{errors::PodError, pod::PodTransaction};
+use alloy::signers::{Signature, SignerSync, k256::ecdsa::SigningKey, local::LocalSigner};
 
 /// Calculates the median value of a mutable slice of `u64` integers.
 ///
