@@ -1,5 +1,8 @@
 [workspace]
-members = [ "bins/client", "bins/replica","crates/pod-core"]
+members = [ "bins/client", "bins/replica","crates/pod-core", "crates/tx-processor"]
 
 
 [workspace.dependencies]
+pod-core = { path = "./crates/pod-core" }
+tx-processor = { path = "./crates/tx-processor" }
+revm = {git = "https://github.com/bluealloy/revm", tag = "v86"}
