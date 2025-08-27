@@ -2,6 +2,7 @@
 use pod_core::primitives::{errors::PodError, pod::PodTransaction};
 
 pub mod evm;
+pub mod riscv;
 
 pub trait PodTransactionProcessor {
     /// Processes a transaction and returns a result indicating success or failure.

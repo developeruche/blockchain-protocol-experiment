@@ -3,4 +3,5 @@ pub enum PodError {
     InvalidTransaction,
     InvalidSignature,
     TransactionProcessingFailed(String),
+    SignatureFailed(String),
 }

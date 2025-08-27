@@ -39,7 +39,7 @@ impl EvmTransactionProcessor {
 impl PodTransactionProcessor for EvmTransactionProcessor {
     fn process_transaction(&mut self, transaction: &PodTransaction) -> Result<(), PodError> {
         self.evm
-            .transact_commit(transaction.to_evm_tx())
+            .transact_commit(transaction.to_vm_tx())
             .map_err(|e| PodError::TransactionProcessingFailed(e.to_string()))?;
 
         Ok(())

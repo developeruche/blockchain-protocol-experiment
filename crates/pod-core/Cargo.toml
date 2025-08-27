@@ -5,3 +5,5 @@ edition = "2024"
 
 [dependencies]
 revm.workspace = true
+alloy.workspace = true
+chrono = "0.4"
