@@ -1,13 +1,14 @@
 use axum::{
     body::Body,
-    extract::{State, Request},
-    http::{StatusCode, header},
+    extract::{Request, State},
+    http::{header, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::post,
     Json, Router,
 };
-use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
+use bytes::Bytes;
+use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -16,9 +17,9 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Clone)]
 struct AppState {
-    data_100mb: Arc<Vec<u8>>,
-    data_300mb: Arc<Vec<u8>>,
-    data_500mb: Arc<Vec<u8>>,
+    data_100mb: Bytes,
+    data_300mb: Bytes,
+    data_500mb: Bytes,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -34,7 +35,6 @@ struct RpcRequest {
     id: u64,
 }
 
-// Custom error type for better error handling
 struct AppError(anyhow::Error);
 
 impl IntoResponse for AppError {
@@ -55,31 +55,26 @@ impl From<anyhow::Error> for AppError {
 
 const SECRET_KEY: &[u8] = b"super_secret_key";
 
-use base64::Engine;
-use hyper_util::rt::TokioIo;
 use hyper::body::Incoming;
+use hyper_util::rt::TokioIo;
 use tower::ServiceExt;
-
-// ... imports
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // ... setup code ...
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
         .init();
 
     tracing::info!("Pre-generating data...");
-    // 100MB, 300MB, 500MB
-    let data_100mb = generate_random_bytes(100 * 1024 * 1024);
-    let data_300mb = generate_random_bytes(300 * 1024 * 1024);
-    let data_500mb = generate_random_bytes(500 * 1024 * 1024);
+    let data_100mb = generate_random_payload(100 * 1024 * 1024);
+    let data_300mb = generate_random_payload(300 * 1024 * 1024);
+    let data_500mb = generate_random_payload(500 * 1024 * 1024);
     tracing::info!("Data generation complete.");
 
     let state = AppState {
-        data_100mb: Arc::new(data_100mb),
-        data_300mb: Arc::new(data_300mb),
-        data_500mb: Arc::new(data_500mb),
+        data_100mb,
+        data_300mb,
+        data_500mb,
     };
 
     let app = Router::new()
@@ -95,19 +90,16 @@ async fn main() -> anyhow::Result<()> {
     let listener = UnixListener::bind(socket_path)?;
     tracing::info!("Server listening on {}", socket_path);
 
-// ...
-    // Custom accept loop for UnixListener with axum 0.7 / hyper 1.0
     loop {
         let (socket, _addr) = listener.accept().await?;
         let app = app.clone();
-        
+
         tokio::spawn(async move {
             let socket = TokioIo::new(socket);
-            
+
             let service = hyper::service::service_fn(move |req: Request<Incoming>| {
                 let app = app.clone();
                 async move {
-                    // Convert hyper::Request<Incoming> to axum::extract::Request
                     let req = req.map(axum::body::Body::new);
                     app.oneshot(req).await
                 }
@@ -123,11 +115,11 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-fn generate_random_bytes(size: usize) -> Vec<u8> {
+fn generate_random_payload(size: usize) -> Bytes {
     let mut rng = rand::thread_rng();
     let mut data = vec![0u8; size];
     rng.fill(&mut data[..]);
-    data
+    Bytes::from(data)
 }
 
 async fn auth_middleware(req: Request, next: Next) -> Result<Response, StatusCode> {
@@ -155,29 +147,22 @@ async fn rpc_handler(
 ) -> Result<impl IntoResponse, AppError> {
     match payload.method.as_str() {
         "get_data" => {
-            let size_str = payload.params.get(0).and_then(|v| v.as_str()).unwrap_or("100mb");
+            let size_str = payload
+                .params
+                .get(0)
+                .and_then(|v| v.as_str())
+                .unwrap_or("100mb");
             let data = match size_str {
                 "100mb" => &state.data_100mb,
                 "300mb" => &state.data_300mb,
                 "500mb" => &state.data_500mb,
                 _ => return Err(anyhow::anyhow!("Invalid size request").into()),
             };
-            
-            // We return raw bytes wrapped in JSON, base64 encoded for JSON compatibility
-            // Since JSON doesn't support raw bytes well, base64 is standard.
-            // However, for pure throughput of "moving bytes", base64 adds overhead (33%).
-            // The prompt asked for "encoded as a base64 string or raw byte array inside the JSON response".
-            // Standard JSON serializers handle Vec<u8> as array of numbers which is huge overhead.
-            // Base64 is the standard way to send binary in JSON.
-            let encoded = base64::engine::general_purpose::STANDARD.encode(data.as_slice());
 
-            let response = serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": encoded,
-                "id": payload.id,
-            });
-
-            Ok(Json(response))
+            Ok((
+                [(header::CONTENT_TYPE, "application/octet-stream")],
+                data.clone(),
+            ))
         }
         _ => Err(anyhow::anyhow!("Method not found").into()),
     }

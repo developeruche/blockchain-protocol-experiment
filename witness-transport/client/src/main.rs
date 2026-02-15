@@ -1,5 +1,6 @@
 use anyhow::Result;
-use hyper::{Request, body::Bytes};
+use http_body_util::BodyExt;
+use hyper::{body::Bytes, Request};
 use hyper_util::rt::TokioIo;
 use jsonwebtoken::{encode, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
@@ -36,18 +37,20 @@ async fn main() -> Result<()> {
 
     tracing::info!("Starting benchmark client...");
 
-    // Generate JWT token
     let claims = Claims {
         sub: "benchmark_user".to_owned(),
-        exp: 10000000000, // far future
+        exp: 10000000000,
     };
-    let token = encode(&Header::default(), &claims, &EncodingKey::from_secret(SECRET_KEY))?;
+    let token = encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(SECRET_KEY),
+    )?;
 
     let sizes = ["100mb", "300mb", "500mb"];
 
     for size in sizes {
         run_benchmark_for_size(size, &token).await?;
-        // Small delay between runs to let things settle
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
@@ -57,9 +60,9 @@ async fn main() -> Result<()> {
 async fn run_benchmark_for_size(size: &str, token: &str) -> Result<()> {
     let stream = UnixStream::connect(SOCKET_PATH).await?;
     let io = TokioIo::new(stream);
-    
+
     let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
-    
+
     tokio::task::spawn(async move {
         if let Err(err) = conn.await {
             tracing::error!("Connection failed: {:?}", err);
@@ -75,7 +78,7 @@ async fn run_benchmark_for_size(size: &str, token: &str) -> Result<()> {
 
     let req = Request::builder()
         .method("POST")
-        .uri("http://localhost/") 
+        .uri("http://localhost/")
         .header("Content-Type", "application/json")
         .header("Authorization", format!("Bearer {}", token))
         .body(http_body_util::Full::new(Bytes::from(request_body)))?;
@@ -85,17 +88,37 @@ async fn run_benchmark_for_size(size: &str, token: &str) -> Result<()> {
 
     let res = sender.send_request(req).await?;
 
-    let body_bytes = http_body_util::BodyExt::collect(res.into_body()).await?.to_bytes();
-    
-    let response: RpcResponse = serde_json::from_slice(&body_bytes)?;
-    
-    // STOP TIMER (after deserialization is complete)
+    if !res.status().is_success() {
+        tracing::error!("Request failed: {:?}", res.status());
+        return Ok(());
+    }
+
+    let mut body = res.into_body();
+
+    let expected_cap = match size {
+        "100mb" => 100 * 1024 * 1024,
+        "300mb" => 300 * 1024 * 1024,
+        "500mb" => 500 * 1024 * 1024,
+        _ => 0,
+    };
+    let mut received_data = Vec::with_capacity(expected_cap);
+
+    while let Some(frame) = body.frame().await {
+        let frame = frame?;
+        if let Ok(chunk) = frame.into_data() {
+            received_data.extend_from_slice(&chunk);
+        }
+    }
+
     let duration = start.elapsed();
 
-    // Verify data length roughly matches (base64 overhead ~33%)
-    // 100MB * 1.33 = ~133MB
-    let received_len = response.result.len();
-    tracing::info!("Size: {}, RTT: {:?}, Received payload len: {} bytes", size, duration, received_len);
+    let received_len = received_data.len();
+    tracing::info!(
+        "Size: {}, RTT: {:?}, Received payload len: {} bytes",
+        size,
+        duration,
+        received_len
+    );
 
     Ok(())
 }
