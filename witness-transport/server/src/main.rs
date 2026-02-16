@@ -160,7 +160,7 @@ async fn rpc_handler(
             };
 
             Ok((
-                [(header::CONTENT_TYPE, "application/octet-stream")],
+                [(header::CONTENT_TYPE, "application/json")],
                 data.clone(),
             ))
         }
