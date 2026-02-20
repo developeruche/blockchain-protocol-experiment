@@ -1,0 +1,14 @@
+syntax = "proto3";
+package benchmark;
+
+message DownloadRequest {
+    uint32 size_mb = 1;
+}
+
+message DataChunk {
+    bytes data = 1;
+}
+
+service BenchmarkService {
+    rpc DownloadData(DownloadRequest) returns (stream DataChunk);
+}
