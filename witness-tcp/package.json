@@ -1,0 +1,17 @@
+{
+  "name": "witness-tcp",
+  "version": "1.0.0",
+  "description": "This repository implements a dead-simple, highly optimized Raw TCP wire protocol defined for transferring large Execution Witnesses.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@types/node": "^25.3.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}
