@@ -1,6 +1,7 @@
 // Protocol Message Types
 pub const MSG_TYPE_REQUEST: u8 = 0x00;
-pub const MSG_TYPE_EXECUTION_WITNESS: u8 = 0x01;
+pub const MSG_TYPE_EXECUTION_WITNESS_BY_BLOCK_NUMBER: u8 = 0x01;
+pub const MSG_TYPE_EXECUTION_WITNESS_BY_BLOCK_HASH: u8 = 0x02;
 
 pub const HEADER_SIZE: usize = 9; // 1 byte type + 8 bytes length
 pub const MAX_PAYLOAD_SIZE: u64 = 5 * 1024 * 1024 * 1024; // 5 GB

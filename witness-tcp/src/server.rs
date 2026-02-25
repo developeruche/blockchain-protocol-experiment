@@ -1,4 +1,4 @@
-use crate::framing::{pack_header, unpack_header, HEADER_SIZE, MSG_TYPE_EXECUTION_WITNESS, MSG_TYPE_REQUEST, MAX_PAYLOAD_SIZE};
+use crate::framing::{pack_header, unpack_header, HEADER_SIZE, MSG_TYPE_EXECUTION_WITNESS_BY_BLOCK_NUMBER, MSG_TYPE_REQUEST, MAX_PAYLOAD_SIZE};
 use crate::payload::{get_chunk, CHUNK_SIZE};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -26,7 +26,7 @@ pub async fn run_server() -> anyhow::Result<()> {
                         }
                         
                         // Send Execution Witness Header
-                        let resp_header = pack_header(MSG_TYPE_EXECUTION_WITNESS, bytes_to_send);
+                        let resp_header = pack_header(MSG_TYPE_EXECUTION_WITNESS_BY_BLOCK_NUMBER, bytes_to_send);
                         if socket.write_all(&resp_header).await.is_ok() {
                             // Stream the chunked payload
                             let chunk = get_chunk();

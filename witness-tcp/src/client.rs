@@ -1,4 +1,4 @@
-use crate::framing::{pack_header, unpack_header, HEADER_SIZE, MSG_TYPE_EXECUTION_WITNESS, MSG_TYPE_REQUEST, MAX_PAYLOAD_SIZE};
+use crate::framing::{pack_header, unpack_header, HEADER_SIZE, MSG_TYPE_EXECUTION_WITNESS_BY_BLOCK_NUMBER, MSG_TYPE_EXECUTION_WITNESS_BY_BLOCK_HASH, MSG_TYPE_REQUEST, MAX_PAYLOAD_SIZE};
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -29,7 +29,7 @@ async fn test_witness_protocol(size_mb: u32) -> anyhow::Result<()> {
     stream.read_exact(&mut header_buf).await?;
     let (msg_type, payload_len) = unpack_header(&header_buf);
 
-    if msg_type != MSG_TYPE_EXECUTION_WITNESS {
+    if msg_type != MSG_TYPE_EXECUTION_WITNESS_BY_BLOCK_NUMBER && msg_type != MSG_TYPE_EXECUTION_WITNESS_BY_BLOCK_HASH {
         return Err(anyhow::anyhow!("Unexpected response message type: {}", msg_type));
     }
 

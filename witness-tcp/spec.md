@@ -30,7 +30,8 @@ A single message frame consists of a 1-byte Message Type identifier, an 8-byte L
 
 Currently, only one message type is defined. Future iterations of the protocol MAY introduce new message types.
 
-*   `0x01`: **Execution Witness**. The payload contains the raw byte-encoded execution witness.
+*   `0x01`: **Execution Witness By Block Number**. The payload contains the raw byte-encoded execution witness.
+*   `0x02`: **Execution Witness By Block Hash**. The payload contains the raw byte-encoded execution witness.
 
 ### Protocol Limits
 
@@ -51,7 +52,8 @@ import struct
 import socket
 
 # Message types
-MSG_TYPE_EXECUTION_WITNESS = 0x01
+MSG_TYPE_EXECUTION_WITNESS_BY_BLOCK_NUMBER = 0x01
+MSG_TYPE_EXECUTION_WITNESS_BY_BLOCK_HASH = 0x02
 
 def send_message(sock: socket.socket, msg_type: int, payload: bytes):
     """
@@ -66,8 +68,11 @@ def send_message(sock: socket.socket, msg_type: int, payload: bytes):
     sock.sendall(header)
     sock.sendall(payload)
 
-def send_execution_witness(sock: socket.socket, witness_data: bytes):
-    send_message(sock, MSG_TYPE_EXECUTION_WITNESS, witness_data)
+def send_execution_witness_by_block_number(sock: socket.socket, witness_data: bytes):
+    send_message(sock, MSG_TYPE_EXECUTION_WITNESS_BY_BLOCK_NUMBER, witness_data)
+
+def send_execution_witness_by_block_hash(sock: socket.socket, witness_data: bytes):
+    send_message(sock, MSG_TYPE_EXECUTION_WITNESS_BY_BLOCK_HASH, witness_data)
 ```
 
 #### Decoding (Server/Receiver)
