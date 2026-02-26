@@ -1,20 +1,20 @@
-[2m2026-02-25T17:20:29.256364Z[0m [32m INFO[0m [2mwitness_tcp[0m[2m:[0m Running TCP benchmarks for sizes: [8, 20, 100, 300, 500]
+[2m2026-02-26T18:45:17.591898Z[0m [32m INFO[0m [2mwitness_tcp[0m[2m:[0m Running TCP benchmarks for sizes: [8, 20, 100, 300, 500]
 --- WARMUP ---
-Wire TCP: TTFB = 539.63µs | Total = 950.33µs | Throughput = 1103.38 MB/s
+Wire TCP: TTFB = 584.96µs | Total = 1.27ms | Throughput =  824.84 MB/s
 --- WARMUP COMPLETE ---
 
 ==== Payload Size: 8 MB ====
-Wire TCP: TTFB = 4.54µs | Total = 4.31ms | Throughput = 1946.37 MB/s
+Wire TCP: TTFB = 3.63µs | Total = 2.90ms | Throughput = 2896.24 MB/s
 
 ==== Payload Size: 20 MB ====
-Wire TCP: TTFB = 4.04µs | Total = 6.67ms | Throughput = 3142.11 MB/s
+Wire TCP: TTFB = 4.92µs | Total = 6.52ms | Throughput = 3214.40 MB/s
 
 ==== Payload Size: 100 MB ====
-Wire TCP: TTFB = 3.00µs | Total = 25.43ms | Throughput = 4123.29 MB/s
+Wire TCP: TTFB = 3.79µs | Total = 26.06ms | Throughput = 4023.39 MB/s
 
 ==== Payload Size: 300 MB ====
-Wire TCP: TTFB = 1.29µs | Total = 48.37ms | Throughput = 6503.99 MB/s
+Wire TCP: TTFB = 1.08µs | Total = 51.22ms | Throughput = 6141.78 MB/s
 
 ==== Payload Size: 500 MB ====
-Wire TCP: TTFB = 2.04µs | Total = 108.06ms | Throughput = 4851.87 MB/s
+Wire TCP: TTFB = 11.04µs | Total = 105.51ms | Throughput = 4969.22 MB/s
 
