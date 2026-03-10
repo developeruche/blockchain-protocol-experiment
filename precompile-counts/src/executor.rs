@@ -21,7 +21,12 @@ impl<P: Provider> Executor<P> {
     pub fn call(&mut self, tx: TxEnv) -> eyre::Result<ExecutionResult> {
         let ctx = Context::mainnet()
             .with_db(&mut self.db)
-            .modify_cfg_chained(|cfg| cfg.chain_id = self.chain_id)
+            .modify_cfg_chained(|cfg| {
+                cfg.chain_id = self.chain_id;
+                cfg.disable_base_fee = true;
+                cfg.disable_block_gas_limit = true;
+                cfg.disable_balance_check = true;
+            })
             .modify_block_chained(|b| *b = self.block_env.inner.clone());
 
         let mut evm = ctx.build_mainnet();
