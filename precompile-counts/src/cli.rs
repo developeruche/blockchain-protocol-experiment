@@ -18,4 +18,16 @@ pub struct Cli {
     /// Chain ID (optional, defaults to the upstream chain ID if not provided)
     #[arg(long)]
     pub chain_id: Option<u64>,
+
+    /// Fetch N blocks sequentially from the fork-block and save them to a file
+    #[arg(long, env = "FETCH_BLOCKS")]
+    pub fetch_blocks: Option<u64>,
+
+    /// The directory to save/load back block batch files
+    #[arg(long, env = "BLOCKS_DIR", default_value = "blocks")]
+    pub blocks_dir: String,
+
+    /// Execute the batched blocks from the specified file locally
+    #[arg(long, env = "RUN_BLOCKS")]
+    pub run_blocks: Option<String>,
 }

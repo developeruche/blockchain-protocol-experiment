@@ -30,6 +30,12 @@ impl<P: Provider> ForkDb<P> {
         }
     }
 
+    pub fn insert_account_info(&self, address: Address, info: AccountInfo) {
+        let mut local = self.overlay.accounts.get(&address).map(|a| a.clone()).unwrap_or_default();
+        local.info = info;
+        self.overlay.accounts.insert(address, local);
+    }
+
     fn fetch_account(&self, address: Address) -> Result<AccountInfo, eyre::Report> {
         let provider = self.provider.clone();
         

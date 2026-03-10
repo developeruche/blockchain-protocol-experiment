@@ -41,4 +41,9 @@ impl<P: Provider> UpstreamProvider<P> {
         let block = self.inner.get_block_by_number(number.into()).await?;
         Ok(block)
     }
+
+    pub async fn get_full_block_by_number(&self, number: u64) -> eyre::Result<Option<alloy::rpc::types::Block>> {
+        let block = self.inner.get_block_by_number(number.into()).full().await?;
+        Ok(block)
+    }
 }
