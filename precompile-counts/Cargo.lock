@@ -1905,6 +1905,7 @@ dependencies = [
  "lru",
  "parking_lot",
  "revm",
+ "revm-inspector",
  "revm-primitives",
  "serde",
  "serde_json",

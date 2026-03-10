@@ -6,6 +6,7 @@ pub mod fork_db;
 pub mod block_env;
 pub mod executor;
 pub mod rpc_server;
+pub mod inspector;
 pub mod types;
 
 
@@ -123,6 +124,20 @@ async fn main() -> eyre::Result<()> {
                         if let Err(e) = exec.execute_alloy_transaction(tx) {
                             tracing::error!("Failed to execute transaction: {:?}", e);
                         }
+                        
+                        // Interim precompile stats print
+                        if (i + 1) % 50 == 0 {
+                            tracing::info!("--- INTERIM PRECOMPILE STATS (Tx {}) ---", i + 1);
+                            let counts = &exec.inspector.counts;
+                            if counts.is_empty() {
+                                tracing::info!("No target precompiles executed yet.");
+                            } else {
+                                for (name, count) in counts {
+                                    tracing::info!("{}: {} calls", name, count);
+                                }
+                            }
+                            tracing::info!("----------------------------------------");
+                        }
                     }
                 } else {
                     tracing::error!("Block {} did not contain full transaction objects in JSON", number);
@@ -131,6 +146,19 @@ async fn main() -> eyre::Result<()> {
         }
         
         tracing::info!("Batch execution completed successfully.");
+        
+        tracing::info!("--- PRECOMPILE USAGE STATISTICS ---");
+        let exec = executor.read().await;
+        let counts = &exec.inspector.counts;
+        if counts.is_empty() {
+            tracing::info!("No target precompiles were executed during this batch.");
+        } else {
+            for (name, count) in counts {
+                tracing::info!("{}: {} calls", name, count);
+            }
+        }
+        tracing::info!("-----------------------------------");
+        
         return Ok(());
     }
 

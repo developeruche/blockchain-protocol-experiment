@@ -1,6 +1,6 @@
 use alloy::primitives::B256;
 use alloy::providers::Provider;
-use revm::{Context, MainBuilder, MainContext, ExecuteEvm, ExecuteCommitEvm};
+use revm::{Context, MainBuilder, MainContext, ExecuteEvm, ExecuteCommitEvm, InspectCommitEvm};
 use revm::context_interface::result::ExecutionResult;
 use revm::context::TxEnv;
 
@@ -11,11 +11,12 @@ pub struct Executor<P> {
     pub db: ForkDb<P>,
     pub block_env: BlockEnvironment,
     pub chain_id: u64,
+    pub inspector: crate::inspector::PrecompileCounter,
 }
 
 impl<P: Provider> Executor<P> {
     pub fn new(db: ForkDb<P>, block_env: BlockEnvironment, chain_id: u64) -> Self {
-        Self { db, block_env, chain_id }
+        Self { db, block_env, chain_id, inspector: Default::default() }
     }
 
     pub fn call(&mut self, tx: TxEnv) -> eyre::Result<ExecutionResult> {
@@ -63,7 +64,7 @@ impl<P: Provider> Executor<P> {
             })
             .modify_block_chained(|b| *b = self.block_env.inner.clone());
 
-        let mut evm = ctx.build_mainnet();
+        let mut evm = ctx.build_mainnet_with_inspector(&mut self.inspector);
         
         let result = evm.transact_commit(tx).map_err(|e| eyre::eyre!("EVM error: {:?}", e))?;
         
