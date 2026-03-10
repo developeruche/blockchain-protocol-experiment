@@ -19,15 +19,19 @@ pub struct Cli {
     #[arg(long)]
     pub chain_id: Option<u64>,
 
-    /// Fetch N blocks sequentially from the fork-block and save them to a file
+    /// Fetch blocks sequentially from fork-block up to this end block and save them to JSON
     #[arg(long, env = "FETCH_BLOCKS")]
     pub fetch_blocks: Option<u64>,
+
+    /// The maximum number of blocks to write sequentially per file
+    #[arg(long, default_value_t = 50)]
+    pub fetch_interval: u64,
 
     /// The directory to save/load back block batch files
     #[arg(long, env = "BLOCKS_DIR", default_value = "blocks")]
     pub blocks_dir: String,
 
-    /// Execute the batched blocks from the specified file locally
+    /// Execute all batched block JSON files from the specified directory locally
     #[arg(long, env = "RUN_BLOCKS")]
     pub run_blocks: Option<String>,
 }

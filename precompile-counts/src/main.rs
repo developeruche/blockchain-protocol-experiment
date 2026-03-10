@@ -34,28 +34,37 @@ async fn main() -> eyre::Result<()> {
     tracing::info!("Chain ID: {}, Fork Block: {}", chain_id, cli.fork_block);
 
     // Block Fetching Mode
-    if let Some(num_blocks) = cli.fetch_blocks {
-        tracing::info!("Fetching {} blocks starting from {}", num_blocks, cli.fork_block);
+    if let Some(end_fetch_block) = cli.fetch_blocks {
+        if end_fetch_block <= cli.fork_block {
+            tracing::error!("Fetch end block must be between fork_block + 1 and infinity");
+            return Ok(());
+        }
+        tracing::info!("Fetching blocks from {} to {} (interval: {})", cli.fork_block + 1, end_fetch_block, cli.fetch_interval);
         std::fs::create_dir_all(&cli.blocks_dir)?;
         
-        let end_block = cli.fork_block + num_blocks;
-        let file_path = format!("{}/n{}-{}.json", cli.blocks_dir, cli.fork_block + 1, end_block);
+        let mut current_block = cli.fork_block + 1;
         
-        let mut blocks = Vec::new();
-        for i in 1..=num_blocks {
-            let target_block = cli.fork_block + i;
-            tracing::info!("Fetching block {}...", target_block);
-            if let Some(block) = provider.get_full_block_by_number(target_block).await? {
-                blocks.push(block);
-            } else {
-                tracing::warn!("Block {} not found on upstream provider!", target_block);
-                break;
+        while current_block <= end_fetch_block {
+            let chunk_end = std::cmp::min(current_block + cli.fetch_interval - 1, end_fetch_block);
+            let file_path = format!("{}/n{}-{}.json", cli.blocks_dir, current_block, chunk_end);
+            
+            let mut blocks = Vec::new();
+            for target_block in current_block..=chunk_end {
+                tracing::info!("Fetching block {}...", target_block);
+                if let Some(block) = provider.get_full_block_by_number(target_block).await? {
+                    blocks.push(block);
+                } else {
+                    tracing::warn!("Block {} not found on upstream provider!", target_block);
+                    break;
+                }
             }
+            
+            let json = serde_json::to_string_pretty(&blocks)?;
+            std::fs::write(&file_path, json)?;
+            tracing::info!("Successfully saved {} blocks to {}", blocks.len(), file_path);
+            
+            current_block = chunk_end + 1;
         }
-        
-        let json = serde_json::to_string_pretty(&blocks)?;
-        std::fs::write(&file_path, json)?;
-        tracing::info!("Successfully saved {} blocks to {}", blocks.len(), file_path);
         
         return Ok(());
     }
@@ -77,33 +86,47 @@ async fn main() -> eyre::Result<()> {
     ));
 
     // Batch Execution Mode
-    if let Some(file_path) = cli.run_blocks {
-        tracing::info!("Running batched blocks from file: {}", file_path);
-        let contents = std::fs::read_to_string(&file_path)?;
-        let blocks: Vec<alloy::rpc::types::Block> = serde_json::from_str(&contents)?;
+    if let Some(dir_path) = cli.run_blocks {
+        tracing::info!("Running batched blocks from directory: {}", dir_path);
         
-        tracing::info!("Loaded {} blocks to execute sequentially.", blocks.len());
+        let mut files: Vec<_> = std::fs::read_dir(&dir_path)?
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+            .collect();
+            
+        // Sort files to ensure chronological sequence based on filename
+        files.sort();
         
-        for block in blocks {
-            let number = block.header.number;
-            tracing::info!("Executing {} transactions in block {}", block.transactions.len(), number);
+        for file_path in files {
+            let contents = std::fs::read_to_string(&file_path)?;
+            let blocks: Vec<alloy::rpc::types::Block> = serde_json::from_str(&contents)?;
             
-            let mut exec = executor.write().await;
+            tracing::info!("Loaded {} blocks from {:?} to execute sequentially.", blocks.len(), file_path);
             
-            // Sync the executor's block env context with the current batch block
-            exec.block_env.inner.number = alloy::primitives::U256::from(number);
-            exec.block_env.inner.timestamp = alloy::primitives::U256::from(block.header.timestamp);
-            exec.block_env.inner.beneficiary = block.header.beneficiary;
-            exec.block_env.inner.basefee = block.header.base_fee_per_gas.unwrap_or_default() as u64;
-            
-            if let alloy::rpc::types::BlockTransactions::Full(txs) = block.transactions {
-                for tx in txs {
-                    if let Err(e) = exec.execute_alloy_transaction(tx) {
-                        tracing::error!("Failed to execute transaction: {:?}", e);
+            for block in blocks {
+                let number = block.header.number;
+                tracing::info!("Executing {} transactions in block {}", block.transactions.len(), number);
+                
+                let mut exec = executor.write().await;
+                
+                // Sync the executor's block env context with the current batch block
+                exec.block_env.inner.number = alloy::primitives::U256::from(number);
+                exec.block_env.inner.timestamp = alloy::primitives::U256::from(block.header.timestamp);
+                exec.block_env.inner.beneficiary = block.header.beneficiary;
+                exec.block_env.inner.basefee = block.header.base_fee_per_gas.unwrap_or_default() as u64;
+                
+                if let alloy::rpc::types::BlockTransactions::Full(txs) = block.transactions {
+                    let total_txs = txs.len();
+                    for (i, tx) in txs.into_iter().enumerate() {
+                        tracing::info!("Executing tx {}/{} - Hash: {:?}", i + 1, total_txs, tx.inner.tx_hash());
+                        if let Err(e) = exec.execute_alloy_transaction(tx) {
+                            tracing::error!("Failed to execute transaction: {:?}", e);
+                        }
                     }
+                } else {
+                    tracing::error!("Block {} did not contain full transaction objects in JSON", number);
                 }
-            } else {
-                tracing::error!("Block {} did not contain full transaction objects in JSON", number);
             }
         }
         
