@@ -100,7 +100,13 @@ impl<P: Provider> DatabaseRef for ForkDb<P> {
             return Ok(Some(info));
         }
 
-        let info = self.fetch_account(address).expect("fetch account failed");
+        let info = match self.fetch_account(address) {
+            Ok(info) => info,
+            Err(e) => {
+                tracing::error!("fetch account failed for {:?}: {:?}", address, e);
+                AccountInfo::default()
+            }
+        };
         Ok(Some(info))
     }
 
@@ -130,7 +136,14 @@ impl<P: Provider> DatabaseRef for ForkDb<P> {
             return Ok(val);
         }
 
-        Ok(self.fetch_storage(address, index).expect("fetch storage failed"))
+        let storage_val = match self.fetch_storage(address, index) {
+            Ok(val) => val,
+            Err(e) => {
+                tracing::error!("fetch storage failed for {:?} at {:?}: {:?}", address, index, e);
+                U256::ZERO
+            }
+        };
+        Ok(storage_val)
     }
     fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {
         let provider = self.provider.clone();
@@ -139,13 +152,16 @@ impl<P: Provider> DatabaseRef for ForkDb<P> {
             self.rt.block_on(async {
                 provider.get_block_by_number(number).await
             })
-        }).expect("fetch block failed");
+        });
 
-        if let Some(b) = block {
-            return Ok(b.header.hash);
+        match block {
+            Ok(Some(b)) => Ok(b.header.hash),
+            Ok(None) => Ok(B256::ZERO),
+            Err(e) => {
+                tracing::error!("fetch block failed for number {}: {:?}", number, e);
+                Ok(B256::ZERO)
+            }
         }
-        
-        Ok(B256::ZERO)
     }
 }
 
