@@ -21,3 +21,6 @@ serde_json = "1.0.149"
 tokio = { version = "1.50.0", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+parquet = "53.0.0"
+bytes = "1.6.0"
+reqwest = "0.12.12"

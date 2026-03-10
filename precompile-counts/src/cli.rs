@@ -23,6 +23,10 @@ pub struct Cli {
     #[arg(long, env = "FETCH_BLOCKS")]
     pub fetch_blocks: Option<u64>,
 
+    /// The provider backend to use for fetching blocks (e.g. "rpc" or "xatu")
+    #[arg(long, default_value = "rpc")]
+    pub provider: String,
+
     /// The maximum number of blocks to write sequentially per file
     #[arg(long, default_value_t = 50)]
     pub fetch_interval: u64,

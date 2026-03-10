@@ -8,6 +8,7 @@ pub mod executor;
 pub mod rpc_server;
 pub mod inspector;
 pub mod types;
+pub mod xatu;
 
 
 use std::sync::Arc;
@@ -43,6 +44,12 @@ async fn main() -> eyre::Result<()> {
         tracing::info!("Fetching blocks from {} to {} (interval: {})", cli.fork_block + 1, end_fetch_block, cli.fetch_interval);
         std::fs::create_dir_all(&cli.blocks_dir)?;
         
+        if cli.provider == "xatu" {
+            tracing::info!("Using Xatu Provider for fetching blocks...");
+            xatu::fetch_blocks_from_xatu(cli.fork_block + 1, end_fetch_block, cli.fetch_interval, &cli.blocks_dir).await?;
+            return Ok(());
+        }
+
         let mut current_block = cli.fork_block + 1;
         
         while current_block <= end_fetch_block {
@@ -51,7 +58,7 @@ async fn main() -> eyre::Result<()> {
             
             let mut blocks = Vec::new();
             for target_block in current_block..=chunk_end {
-                tracing::info!("Fetching block {}...", target_block);
+                tracing::info!("Fetching block {} via RPC...", target_block);
                 if let Some(block) = provider.get_full_block_by_number(target_block).await? {
                     blocks.push(block);
                 } else {
