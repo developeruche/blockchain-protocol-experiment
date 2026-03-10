@@ -36,6 +36,15 @@ pub trait EthRpc {
 
     #[method(name = "sendRawTransaction")]
     async fn send_raw_transaction(&self, tx: Bytes) -> RpcResult<B256>;
+
+    #[method(name = "gasPrice")]
+    async fn gas_price(&self) -> RpcResult<U256>;
+
+    #[method(name = "estimateGas")]
+    async fn estimate_gas(&self, request: TransactionRequest, block: Option<BlockId>) -> RpcResult<U256>;
+
+    #[method(name = "getTransactionReceipt")]
+    async fn get_transaction_receipt(&self, hash: B256) -> RpcResult<Option<serde_json::Value>>;
 }
 
 pub struct EthRpcImpl<P> {
@@ -56,6 +65,33 @@ impl<P: Provider + Send + Sync + 'static> EthRpcServer for EthRpcImpl<P> {
     async fn chain_id(&self) -> RpcResult<U256> {
         let exec = self.executor.read().await;
         Ok(U256::from(exec.chain_id))
+    }
+
+    async fn gas_price(&self) -> RpcResult<U256> {
+        Ok(U256::from(1_000_000_000))
+    }
+
+    async fn estimate_gas(&self, _request: TransactionRequest, _block: Option<BlockId>) -> RpcResult<U256> {
+        Ok(U256::from(15_000_000))
+    }
+
+    async fn get_transaction_receipt(&self, hash: B256) -> RpcResult<Option<serde_json::Value>> {
+        let receipt = serde_json::json!({
+            "transactionHash": hash,
+            "transactionIndex": "0x0",
+            "blockHash": "0xd4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3",
+            "blockNumber": "0x1",
+            "from": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "to": null,
+            "cumulativeGasUsed": "00",
+            "gasUsed": "0x00",
+            "contractAddress": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+            "logs": [],
+            "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "status": "0x1",
+            "type": "0x0"
+        });
+        Ok(Some(receipt))
     }
 
     async fn block_number(&self) -> RpcResult<U256> {

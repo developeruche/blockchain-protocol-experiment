@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use alloy::primitives::Address;
 use revm_inspector::Inspector;
-use revm::interpreter::{CallInputs, CallOutcome, InterpreterTypes};
+use revm::interpreter::{CallInputs, CallOutcome, InterpreterTypes, Interpreter};
 
 #[derive(Default, Debug)]
 pub struct PrecompileCounter {
@@ -10,7 +10,7 @@ pub struct PrecompileCounter {
 
 impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for PrecompileCounter {
     fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
-        let target = inputs.target_address;
+        let target = inputs.target_address;       
         if target == Address::with_last_byte(2) {
             *self.counts.entry("sha256").or_default() += 1;
         } else if target == Address::with_last_byte(3) {

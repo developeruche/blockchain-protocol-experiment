@@ -1,6 +1,7 @@
 use alloy::primitives::B256;
 use alloy::providers::Provider;
-use revm::{Context, MainBuilder, MainContext, ExecuteEvm, ExecuteCommitEvm, InspectCommitEvm};
+use revm::{Context, MainBuilder, MainContext};
+use revm_inspector::{InspectEvm, InspectCommitEvm};
 use revm::context_interface::result::ExecutionResult;
 use revm::context::TxEnv;
 
@@ -30,9 +31,13 @@ impl<P: Provider> Executor<P> {
             })
             .modify_block_chained(|b| *b = self.block_env.inner.clone());
 
-        let mut evm = ctx.build_mainnet();
+        let mut evm = ctx.build_mainnet_with_inspector(&mut self.inspector);
         
-        let result = evm.transact(tx).map_err(|e| eyre::eyre!("EVM error: {:?}", e))?;
+        // inspect_tx returns ExecResultAndState. Our call expected ExecutionResult before.
+        let result = evm.inspect_tx(tx).map_err(|e| eyre::eyre!("EVM error: {:?}", e))?;
+        
+        self.print_precompile_stats("RPC eth_call");
+        
         Ok(result.result)
     }
 
@@ -42,13 +47,15 @@ impl<P: Provider> Executor<P> {
             .modify_cfg_chained(|cfg| cfg.chain_id = self.chain_id)
             .modify_block_chained(|b| *b = self.block_env.inner.clone());
 
-        let mut evm = ctx.build_mainnet();
+        let mut evm = ctx.build_mainnet_with_inspector(&mut self.inspector);
         
-        let result = evm.transact_commit(tx).map_err(|e| eyre::eyre!("EVM error: {:?}", e))?;
+        let result = evm.inspect_tx_commit(tx).map_err(|e| eyre::eyre!("EVM error: {:?}", e))?;
         
         let _new_block = self.block_env.increment_block();
 
         let tx_hash = B256::ZERO; 
+        
+        self.print_precompile_stats("RPC send_raw_transaction");
         
         Ok((result, tx_hash))
     }
@@ -66,7 +73,7 @@ impl<P: Provider> Executor<P> {
 
         let mut evm = ctx.build_mainnet_with_inspector(&mut self.inspector);
         
-        let result = evm.transact_commit(tx).map_err(|e| eyre::eyre!("EVM error: {:?}", e))?;
+        let result = evm.inspect_tx_commit(tx).map_err(|e| eyre::eyre!("EVM error: {:?}", e))?;
         
         let tx_hash = B256::ZERO; 
         
@@ -109,5 +116,18 @@ impl<P: Provider> Executor<P> {
 
         let (result, _) = self.send_transaction_batch(env)?;
         Ok(result)
+    }
+
+    pub fn print_precompile_stats(&self, context: &str) {
+        tracing::info!("--- PRECOMPILE USAGE STATISTICS ({}) ---", context);
+        let counts = &self.inspector.counts;
+        if counts.is_empty() {
+            tracing::info!("No target precompiles were executed.");
+        } else {
+            for (name, count) in counts {
+                tracing::info!("{}: {} calls", name, count);
+            }
+        }
+        tracing::info!("----------------------------------------");
     }
 }
