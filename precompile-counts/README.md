@@ -11,6 +11,7 @@ Built on top of [revm](https://github.com/bluealloy/revm) and [alloy](https://gi
 - **Batch Block Fetching & Execution**: Automatically downloads sequences of mainnet blocks into local JSON files and replays all the encapsulated transactions sequentially over the simulated state.
 - **Precompile Introspection**: Seamlessly wires `revm-inspector` hooks into the execution pipeline using `inspect_tx_commit`. It intercepts sub-calls (`STATICCALL`, `CALL`, etc.) to count and log usages of complex precompiles (e.g. `sha256`, `modexp`, `blake2f`, `point_eval`, `identity`, `ripemd160`).
 - **State Overlays**: Mutates local state via an memory-based Overlay DB without polluting or requiring a full archive node sync.
+- **Xatu Parquet Integration**: Natively fetches and digests EthPandaOps `canonical_execution` Parquet files directly into memory, enabling highly accelerated mass block retrieval without relying on rate-limited JSON-RPC `eth_getBlock` queries.
 
 ## Prerequisites
 
@@ -34,7 +35,7 @@ Once running, you can connect your tooling (like Foundry `cast` or Ethers.js) di
 
 ### 2. Fetching Blocks
 
-To fetch a chunk of consecutive blocks and save them locally for offline replay:
+To fetch a chunk of consecutive blocks and save them locally for offline replay, use `--fetch-blocks N`:
 
 ```bash
 cargo run --release -- \
@@ -44,6 +45,20 @@ cargo run --release -- \
     --blocks-dir ./blocks
 ```
 This will fetch blocks `24625512` to `24625561` and store them in the `./blocks` directory.
+
+#### Accelerated Fetching with Xatu Parquet Provider
+If you want to bypass standard RPC rate limits when fetching massive ranges of contiguous blocks, supply `--provider xatu` along with an optional `--fetch-interval` (e.g. `50`). The engine will download full Apache Parquet datasets from the EthPandaOps canonical execution tables:
+
+```bash
+cargo run --release -- \
+    --provider xatu \
+    --rpc-url "https://eth-mainnet.g.alchemy.com/v2/YOUR_API_KEY" \
+    --fork-block 21499999 \
+    --fetch-blocks 21500050 \
+    --fetch-interval 50 \
+    --chain-id 1 
+```
+*Note: A valid `--rpc-url` is still required here to initialize the underlying lazy-loading base state, even though blocks are downloaded via Xatu.*
 
 ### 3. Replaying Blocks
 
@@ -56,6 +71,19 @@ cargo run --release -- \
     --run-blocks ./blocks
 ```
 The node will execute every transaction within the block batch, incrementing block indices and updating the base fees automatically.
+
+#### Streaming Replay directly from Xatu
+You can skip saving blocks locally entirely and pipe Parquet blocks directly into the execution engine. Provide `--provider xatu` alongside the absolute target end-block to simulate via `--fetch-blocks`:
+
+```bash
+cargo run --release -- \
+    --provider xatu \
+    --rpc-url "https://eth-mainnet.g.alchemy.com/v2/YOUR_API_KEY" \
+    --fork-block 21499999 \
+    --run-blocks stream \
+    --fetch-blocks 21500050 \
+    --chain-id 1
+```
 
 ## Precompile Testing Script
 
@@ -75,6 +103,7 @@ The script:
 ## Architecture
 
 * `src/provider.rs`: Asynchronous upstream RPC fetching layer powered by `alloy`.
+* `src/xatu.rs`: Accelerated block and transaction ingestion pipeline utilizing EthPandaOps Parquet data lakes. Dynamically maps missing fields into `alloy` JSON compliance on-the-fly.
 * `src/cache.rs`: In-memory caching for retrieved upstream data (`AccountInfo`, block hashes, etc).
 * `src/overlay_db.rs`: A layered mutable database preserving local execution diffs.
 * `src/fork_db.rs`: Combines the Provider, Cache, and Overlay into a unified `revm::DatabaseRef`.

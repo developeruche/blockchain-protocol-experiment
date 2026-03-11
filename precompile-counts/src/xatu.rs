@@ -29,8 +29,26 @@ pub async fn fetch_blocks_from_xatu(
     while current_block <= end_block {
         let fetch_end = std::cmp::min(current_block + interval - 1, end_block);
         
-        let chunk_base = (current_block / 1000) * 1000;
-        let mut all_blocks_in_chunk: HashMap<u64, serde_json::Value> = HashMap::new();
+        let blocks_arr = get_xatu_blocks(&client, current_block, fetch_end).await?;
+        
+        let file_path = format!("{}/n{}-{}.json", blocks_dir, current_block, fetch_end);
+        let json_str = serde_json::to_string_pretty(&blocks_arr)?;
+        std::fs::write(&file_path, json_str)?;
+        tracing::info!("Successfully saved {} blocks from Xatu to {}", blocks_arr.len(), file_path);
+        
+        current_block = fetch_end + 1;
+    }
+    
+    Ok(())
+}
+
+pub async fn get_xatu_blocks(client: &reqwest::Client, start_block: u64, end_block: u64) -> eyre::Result<Vec<serde_json::Value>> {
+    let chunk_base = (start_block / 1000) * 1000;
+    
+    // Cross-chunk fetches are not supported by this simple chunk base logic!
+    assert_eq!((end_block / 1000) * 1000, chunk_base, "Fetch interval crossed chunk boundary!");
+
+    let mut all_blocks_in_chunk: HashMap<u64, serde_json::Value> = HashMap::new();
         
         let block_url = format!("{}/canonical_execution_block/1000/{}.parquet", XATU_BASE_URL, chunk_base);
         tracing::info!("Downloading Blocks Parquet from {}", block_url);
@@ -40,7 +58,7 @@ pub async fn fetch_blocks_from_xatu(
         for row in block_reader.get_row_iter(None)? {
             let row = row?;
             let b_num = row.get_ulong(2).unwrap_or(0) as u64;
-            if b_num < current_block || b_num > fetch_end { continue; }
+            if b_num < start_block || b_num > end_block { continue; }
             
             let ts = row.get_ulong(1).unwrap_or(0) as u64;
             
@@ -92,11 +110,11 @@ pub async fn fetch_blocks_from_xatu(
         let tx_bytes = client.get(&tx_url).send().await?.bytes().await?;
         let tx_reader = SerializedFileReader::new(tx_bytes)?;
         
-        let mut tx_map: HashMap<u64, Vec<serde_json::Value>> = HashMap::new();
+        let mut tx_map: HashMap<u64, Vec<(u64, serde_json::Value)>> = HashMap::new();
         for row in tx_reader.get_row_iter(None)? {
             let row = row?;
             let b_num = row.get_ulong(1).unwrap_or(0) as u64;
-            if b_num < current_block || b_num > fetch_end { continue; }
+            if b_num < start_block || b_num > end_block { continue; }
             
             let tx_idx = row.get_ulong(2).unwrap_or(0) as u64;
             let nonce = row.get_ulong(4).unwrap_or(0) as u64;
@@ -190,29 +208,22 @@ pub async fn fetch_blocks_from_xatu(
                 tx_json.as_object_mut().unwrap().insert("blobVersionedHashes".to_string(), json!([]));
             }
 
-            tx_map.entry(b_num).or_default().push(tx_json);
+            tx_map.entry(b_num).or_default().push((tx_idx, tx_json));
         }
         
         let mut blocks_arr = Vec::new();
-        for target_block in current_block..=fetch_end {
+        for target_block in start_block..=end_block {
             if let Some(mut b) = all_blocks_in_chunk.remove(&target_block) {
                 if let Some(mut txs) = tx_map.remove(&target_block) {
-                    // Sorting happens natively anyway, but index is preserved in the array
-                    b.as_object_mut().unwrap().insert("transactions".to_string(), json!(txs));
+                    txs.sort_by_key(|t| t.0);
+                    let sorted_txs: Vec<serde_json::Value> = txs.into_iter().map(|t| t.1).collect();
+                    b.as_object_mut().unwrap().insert("transactions".to_string(), json!(sorted_txs));
                 }
                 blocks_arr.push(b);
             }
         }
         
-        let file_path = format!("{}/n{}-{}.json", blocks_dir, current_block, fetch_end);
-        let json_str = serde_json::to_string_pretty(&blocks_arr)?;
-        std::fs::write(&file_path, json_str)?;
-        tracing::info!("Successfully saved {} blocks from Xatu to {}", blocks_arr.len(), file_path);
-        
-        current_block = fetch_end + 1;
-    }
-    
-    Ok(())
+        Ok(blocks_arr)
 }
 
 #[cfg(test)]
