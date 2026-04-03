@@ -1,0 +1,8 @@
+[package]
+name = "algo"
+version = "0.1.0"
+edition = "2024"
+description = "A personal study library for blockchain/systems-engineering technical interviews: data structures, algorithms, and LeetCode solutions with rich educational comments."
+
+[lib]
+path = "src/lib.rs"
