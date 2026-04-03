@@ -1,0 +1,20 @@
+[[automation.transfer_watcher]]
+strategy = "event_log"
+contract_address = "0xABC..."
+event_signature = "Transfer(address,address,uint256)"
+
+[[automation.heartbeat]]
+strategy = "interval"
+interval_secs = 3600
+
+[[automation.one_time_alert]]
+strategy = "timeout"
+timeout_secs = 86400
+
+[network]
+rpc_url = "https://mainnet.infura.io/v3/..."
+ws_url  = "wss://mainnet.infura.io/ws/v3/..."
+chain_id = 1
+
+[automate_contract]
+address = "0xDEF..."     # The AutomateContract registry address
