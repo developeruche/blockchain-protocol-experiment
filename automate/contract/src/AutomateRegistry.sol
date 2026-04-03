@@ -124,7 +124,10 @@ contract AutomateRegistry {
     ///         Reverts the whole tx if the target call fails —
     ///         this means the keeper knows immediately without log parsing.
     /// @param jobId  The job to execute.
-    function execute(bytes32 jobId) external onlyKeeper jobExists(jobId) {
+    function execute(bytes32 jobId) external {
+        if (!_keepers[msg.sender]) revert("NotKeeper Error");
+        if (_jobs[jobId].createdAt == 0) revert("JobNotFound Error");
+
         Job storage job = _jobs[jobId];
 
         if (job.status != JobStatus.Active) revert JobNotActive();
@@ -188,14 +191,12 @@ contract AutomateRegistry {
     }
 
     /// @notice Deterministically compute a jobId off-chain before registering.
-    function computeJobId(address jobOwner, address target, bytes calldata callData) external view returns (bytes32) {
+    function computeJobId(address jobOwner, address target, bytes calldata callData) external pure returns (bytes32) {
         return _computeJobId(jobOwner, target, callData);
     }
     
-    function _computeJobId(address jobOwner, address target, bytes memory callData) internal view returns (bytes32) {
-        // block.timestamp in the seed makes collisions on re-registration
-        // effectively impossible without making jobId predictable from off-chain.
-        bytes memory data = abi.encodePacked(jobOwner, target, callData, block.timestamp, block.chainid);
+    function _computeJobId(address jobOwner, address target, bytes memory callData) internal pure returns (bytes32) {
+        bytes memory data = abi.encodePacked(jobOwner, target, callData);
         bytes32 result;
         assembly {
             result := keccak256(add(data, 0x20), mload(data))

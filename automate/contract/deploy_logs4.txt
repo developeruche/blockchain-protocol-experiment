@@ -1,0 +1,37 @@
+Compiling 19 files with Solc 0.8.30
+Solc 0.8.30 finished in 406.03ms
+Compiler run successful!
+Script ran successfully.
+
+== Logs ==
+  AutomateRegistry deployed at: 0xa85233C63b9Ee964Add6F2cffe00Fd84eb32338f
+  MockAutomatable deployed at: 0x4A679253410272dd5232B3Ff7cF5dbB88f295319
+  Added keeper: 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+  ----- CONFIG VARS -----
+  automate_contract = '0xa85233C63b9Ee964Add6F2cffe00Fd84eb32338f'
+  calldata = '0x000000000000000000000000000000000000000000000000000000000000002a'
+  jobId = '0xf4a36dc2ef5ac8b9eb3021e81942a5bf525b8b09ba65f1049446194d521b9585'
+
+## Setting up 1 EVM.
+
+==========================
+
+Chain 31337
+
+Estimated gas price: 2.149271938 gwei
+
+Estimated total gas used for script: 3355979
+
+Estimated amount required: 0.007212911489217302 ETH
+
+==========================
+
+
+==========================
+
+ONCHAIN EXECUTION COMPLETE & SUCCESSFUL.
+
+Transactions saved to: /Users/gregg/Documents/projects/RESEARCH/blockchain-protocol-experiment/automate/contract/broadcast/DeployAnvil.s.sol/31337/run-latest.json
+
+Sensitive values saved to: /Users/gregg/Documents/projects/RESEARCH/blockchain-protocol-experiment/automate/contract/cache/DeployAnvil.s.sol/31337/run-latest.json
+

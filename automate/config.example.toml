@@ -1,20 +1,31 @@
-[[automation.transfer_watcher]]
-strategy = "event_log"
-contract_address = "0xABC..."
-event_signature = "Transfer(address,address,uint256)"
+[global]
+rpc_http = "http://127.0.0.1:8545"
+rpc_ws   = "ws://127.0.0.1:8545"
+automate_contract = "0x5FbDB2315678afecb367f032d93F642f64180aa3" # Example local address
+private_key_env   = "PRIVATE_KEY"
+chain_id          = 31337
+max_fee_per_gas_gwei     = 50
+max_priority_fee_gwei    = 2
+gas_limit                = 500_000
 
-[[automation.heartbeat]]
-strategy = "interval"
-interval_secs = 3600
+[[automation]]
+id          = "my-timeout-automation"
+trigger     = "timeout"
+timeout_ms  = 30_000                        
+calldata    = "0xabcdef"                 
 
-[[automation.one_time_alert]]
-strategy = "timeout"
-timeout_secs = 86400
+[[automation]]
+id          = "my-interval-automation"
+trigger     = "interval"
+interval_ms = 60_000                        
+calldata    = "0x123456"
 
-[network]
-rpc_url = "https://mainnet.infura.io/v3/..."
-ws_url  = "wss://mainnet.infura.io/ws/v3/..."
-chain_id = 1
-
-[automate_contract]
-address = "0xDEF..."     # The AutomateContract registry address
+[[automation]]
+id          = "my-eventlog-automation"
+trigger     = "event_log"
+contract_address = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
+event_signature  = "Transfer(address,address,uint256)"
+topic_filters    = [
+  { position = 1, value = "0x0000000000000000000000000000000000000000000000000000000000000000" } # e.g. from address(0)
+]
+calldata = "0xdeadbeef"
