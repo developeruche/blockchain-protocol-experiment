@@ -1,8 +1,8 @@
 use alloy::primitives::{Address, B256};
 use alloy::providers::Provider;
 use chrono::Utc;
-use contract_bindings::AutomateContract;
-use shared::{
+use primitives::contract::AutomateContract;
+use primitives::shared::{
     AutomationError, ErrorBus, ExecutionRecord, ExecutionStatus, Metrics, PersistenceStore,
     SharedState, TaskMessage,
 };
@@ -188,7 +188,7 @@ impl<P: Clone + Send + Sync + 'static> ExecutorTask<P> {
         
         info!("Executing JOB_ID natively: {}", job_id);
         
-        let contract_instance = contract_bindings::AutomateRegistry::new(self.contract.address, self.contract.http_provider.clone());
+        let contract_instance = primitives::contract::AutomateRegistry::new(self.contract.address, self.contract.http_provider.clone());
 
         // 1. Estimate gas implicitly or request builder
         let call_builder = contract_instance.execute(job_id)

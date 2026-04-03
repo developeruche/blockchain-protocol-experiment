@@ -16,14 +16,14 @@ contract DebuggerTest is Test {
 
     function testExecuteTrace() public {
         vm.startPrank(keeper);
-        
+
         bytes memory data = abi.encode(uint256(42));
         MockAutomatable mock = new MockAutomatable(address(registry));
         bytes32 jobId = registry.registerJob(address(mock), data);
 
         bool active = registry.isJobActive(jobId);
         console.log("Is active locally deployed:", active);
-        
+
         registry.execute(jobId);
         console.log("Execution successful locally!");
         vm.stopPrank();

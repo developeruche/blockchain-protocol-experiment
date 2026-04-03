@@ -49,7 +49,6 @@ contract AutomateRegistry {
     error ZeroAddress();
     error JobAlreadyExists();
 
-
     modifier onlyOwner() {
         _onlyOwner();
         _;
@@ -86,11 +85,9 @@ contract AutomateRegistry {
         if (_jobs[jobId].createdAt == 0) revert JobNotFound();
     }
 
-
     constructor() {
         owner = msg.sender;
     }
-
 
     /// @notice Register a new automation job.
     /// @param target    The contract that implements IAutomatable.
@@ -118,7 +115,6 @@ contract AutomateRegistry {
         emit JobRegistered(jobId, msg.sender, target, callData);
     }
 
-
     /// @notice Execute a job. Only callable by an approved keeper.
     ///         Calls target.performAutomation(jobId, callData).
     ///         Reverts the whole tx if the target call fails —
@@ -144,7 +140,6 @@ contract AutomateRegistry {
         emit JobExecuted(jobId, msg.sender, job.executionCount, uint64(block.timestamp));
     }
 
-
     function pauseJob(bytes32 jobId) external jobExists(jobId) onlyJobOwner(jobId) {
         Job storage job = _jobs[jobId];
         if (job.status == JobStatus.Cancelled) revert JobAlreadyCancelled();
@@ -165,7 +160,6 @@ contract AutomateRegistry {
         emit JobCancelled(jobId);
     }
 
-
     function addKeeper(address keeper) external onlyOwner {
         if (keeper == address(0)) revert ZeroAddress();
         _keepers[keeper] = true;
@@ -176,7 +170,6 @@ contract AutomateRegistry {
         _keepers[keeper] = false;
         emit KeeperRemoved(keeper);
     }
-
 
     function getJob(bytes32 jobId) external view jobExists(jobId) returns (Job memory) {
         return _jobs[jobId];
@@ -194,7 +187,7 @@ contract AutomateRegistry {
     function computeJobId(address jobOwner, address target, bytes calldata callData) external pure returns (bytes32) {
         return _computeJobId(jobOwner, target, callData);
     }
-    
+
     function _computeJobId(address jobOwner, address target, bytes memory callData) internal pure returns (bytes32) {
         bytes memory data = abi.encodePacked(jobOwner, target, callData);
         bytes32 result;

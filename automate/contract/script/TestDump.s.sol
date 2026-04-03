@@ -13,7 +13,7 @@ contract TestDump is Script {
         console.log("isJobActive:", active);
 
         address owner = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
-        
+
         vm.startBroadcast(owner);
         // Let's actually execute it via a script!
         reg.execute(jid);

@@ -1,9 +1,9 @@
 use alloy::primitives::{Address, Bytes, B256};
 use alloy::providers::Provider;
 use alloy::rpc::types::{Filter, Log};
-use config::{TriggerStrategy, TopicFilter};
+use primitives::config::{TriggerStrategy, TopicFilter};
 use futures_util::stream::StreamExt;
-use shared::{AutomationError, ErrorBus, Metrics, ProviderPool, SharedState, TaskMessage};
+use primitives::shared::{AutomationError, ErrorBus, Metrics, ProviderPool, SharedState, TaskMessage};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep, Duration};

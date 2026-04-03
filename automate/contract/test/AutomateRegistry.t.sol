@@ -19,7 +19,7 @@ contract AutomateRegistryTest is Test {
     function setUp() public {
         vm.prank(owner);
         registry = new AutomateRegistry();
-        
+
         target = new MockAutomatable(address(registry));
 
         vm.prank(owner);
@@ -32,25 +32,25 @@ contract AutomateRegistryTest is Test {
 
     function test_registerJob_Success() public {
         vm.startPrank(jobOwner);
-        
+
         bytes32 expectedJobId = registry.computeJobId(jobOwner, address(target), defaultData);
-        
+
         vm.expectEmit(true, true, true, true);
         emit AutomateRegistry.JobRegistered(expectedJobId, jobOwner, address(target), defaultData);
-        
+
         bytes32 jobId = registry.registerJob(address(target), defaultData);
-        
+
         assertEq(jobId, expectedJobId);
 
         AutomateRegistry.Job memory job = registry.getJob(jobId);
         assertEq(job.owner, jobOwner);
         assertEq(job.target, address(target));
         assertEq(job.callData, defaultData);
-        assertEq(uint(job.status), uint(AutomateRegistry.JobStatus.Active));
+        assertEq(uint256(job.status), uint256(AutomateRegistry.JobStatus.Active));
         assertEq(job.executionCount, 0);
         assertEq(job.lastExecutedAt, 0);
         assertEq(job.createdAt, block.timestamp);
-        
+
         assertTrue(registry.isJobActive(jobId));
         vm.stopPrank();
     }
@@ -63,14 +63,14 @@ contract AutomateRegistryTest is Test {
 
     function test_registerJob_AlreadyExists() public {
         vm.startPrank(jobOwner);
-        
+
         // Registering the exact same job in the same block will generate the same jobId
         bytes32 jobId = registry.registerJob(address(target), defaultData);
         assertTrue(jobId != bytes32(0));
 
         vm.expectRevert(AutomateRegistry.JobAlreadyExists.selector);
         registry.registerJob(address(target), defaultData);
-        
+
         vm.stopPrank();
     }
 
@@ -84,10 +84,10 @@ contract AutomateRegistryTest is Test {
         vm.warp(block.timestamp + 100);
 
         vm.prank(keeper);
-        
+
         vm.expectEmit(true, true, false, true);
         emit AutomateRegistry.JobExecuted(jobId, keeper, 1, uint64(block.timestamp));
-        
+
         registry.execute(jobId);
 
         assertEq(target.callCount(), 1);
@@ -158,7 +158,7 @@ contract AutomateRegistryTest is Test {
         registry.pauseJob(jobId);
 
         AutomateRegistry.Job memory job = registry.getJob(jobId);
-        assertEq(uint(job.status), uint(AutomateRegistry.JobStatus.Paused));
+        assertEq(uint256(job.status), uint256(AutomateRegistry.JobStatus.Paused));
         assertFalse(registry.isJobActive(jobId));
     }
 
@@ -186,14 +186,14 @@ contract AutomateRegistryTest is Test {
 
         vm.startPrank(jobOwner);
         registry.pauseJob(jobId);
-        
+
         vm.expectEmit(true, false, false, false);
         emit AutomateRegistry.JobResumed(jobId);
         registry.resumeJob(jobId);
         vm.stopPrank();
 
         AutomateRegistry.Job memory job = registry.getJob(jobId);
-        assertEq(uint(job.status), uint(AutomateRegistry.JobStatus.Active));
+        assertEq(uint256(job.status), uint256(AutomateRegistry.JobStatus.Active));
         assertTrue(registry.isJobActive(jobId));
     }
 
@@ -232,7 +232,7 @@ contract AutomateRegistryTest is Test {
         registry.cancelJob(jobId);
 
         AutomateRegistry.Job memory job = registry.getJob(jobId);
-        assertEq(uint(job.status), uint(AutomateRegistry.JobStatus.Cancelled));
+        assertEq(uint256(job.status), uint256(AutomateRegistry.JobStatus.Cancelled));
         assertFalse(registry.isJobActive(jobId));
     }
 
@@ -250,7 +250,7 @@ contract AutomateRegistryTest is Test {
 
     function test_addKeeper_Success() public {
         address newKeeper = makeAddr("newKeeper");
-        
+
         vm.prank(owner);
         vm.expectEmit(true, false, false, false);
         emit AutomateRegistry.KeeperAdded(newKeeper);
@@ -261,7 +261,7 @@ contract AutomateRegistryTest is Test {
 
     function test_addKeeper_NotOwner() public {
         address newKeeper = makeAddr("newKeeper");
-        
+
         vm.prank(rando);
         vm.expectRevert(AutomateRegistry.NotOwner.selector);
         registry.addKeeper(newKeeper);

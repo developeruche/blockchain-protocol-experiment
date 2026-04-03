@@ -1,0 +1,23 @@
+[global]
+rpc_http = "https://eth-sepolia.g.alchemy.com/v2/diWtHiEFpWCZ8xCz8a6fm"
+rpc_ws   = "wss://eth-sepolia.g.alchemy.com/v2/diWtHiEFpWCZ8xCz8a6fm"
+automate_contract = "0xcf1A8BE2Bd90B41eE1337DF7D96c56e133faf023"
+private_key_env   = "PRIVATE_KEY"
+chain_id          = 11155111
+max_fee_per_gas_gwei     = 50
+max_priority_fee_gwei    = 2
+gas_limit                = 500_000
+
+[[automation]]
+id          = "0x2cef9f4b059cff4c93d515cc71efc43c0dbd3cebb3cf3f302bda80872e72c379"
+trigger     = "timeout"
+timeout_ms  = 60000                        
+calldata    = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000078"
+
+
+[[automation]]
+id          = "0x16e1a2e5382447b1b71494826c2f6a9c80da4ab97fa45ba92576aab625410246"
+trigger     = "interval"
+interval_ms  = 30000                        
+calldata    = "0x0000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000003c"
+

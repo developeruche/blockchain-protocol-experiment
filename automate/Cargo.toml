@@ -1,11 +1,8 @@
 [workspace]
 members = [
-    "crates/config",
-    "crates/shared",
-    "crates/contract-bindings",
-    "crates/trigger",
-    "crates/executor",
-    "crates/runtime",
+    "crates/tasks", 
+    "crates/primitives", 
+    "bin/automate",
 ]
 resolver = "2"
 

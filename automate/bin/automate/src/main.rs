@@ -44,8 +44,6 @@ async fn main() -> anyhow::Result<()> {
 
     let pk_var = &config.global.private_key_env;
     let pk_hex = std::env::var(pk_var).unwrap_or_else(|_| {
-        // dummy private key for ease of compiling and showing it works when you don't export it
-        // Do NOT use in production!
         warn!("Private key env var {} not found. Using dummy key for testing.", pk_var);
         "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string()
     });
@@ -64,7 +62,6 @@ async fn main() -> anyhow::Result<()> {
         .wallet(wallet)
         .on_http(config.global.rpc_http.parse()?);
 
-    // Boxed providers for Trigger
     let read_http_provider = ProviderBuilder::new()
         .on_http(config.global.rpc_http.parse()?)
         .boxed();
@@ -101,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
         info!("Setting up automation `{}`", automation.id);
 
         let (tx, rx) = mpsc::channel(100);
-        let calldata = alloy::primitives::Bytes::from_static(b""); // Generated from config
+        let calldata = alloy::primitives::Bytes::from_static(b"");
 
         let trigger = TriggerTask {
             automation_id: automation.id.clone(),
