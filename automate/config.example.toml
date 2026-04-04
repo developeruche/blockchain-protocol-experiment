@@ -1,0 +1,31 @@
+[global]
+rpc_http = "http://127.0.0.1:8545"
+rpc_ws   = "ws://127.0.0.1:8545"
+automate_contract = "0x5FbDB2315678afecb367f032d93F642f64180aa3" # Example local address
+private_key_env   = "PRIVATE_KEY"
+chain_id          = 31337
+max_fee_per_gas_gwei     = 50
+max_priority_fee_gwei    = 2
+gas_limit                = 500_000
+
+[[automation]]
+id          = "my-timeout-automation"
+trigger     = "timeout"
+timeout_ms  = 30_000                        
+calldata    = "0xabcdef"                 
+
+[[automation]]
+id          = "my-interval-automation"
+trigger     = "interval"
+interval_ms = 60_000                        
+calldata    = "0x123456"
+
+[[automation]]
+id          = "my-eventlog-automation"
+trigger     = "event_log"
+contract_address = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
+event_signature  = "Transfer(address,address,uint256)"
+topic_filters    = [
+  { position = 1, value = "0x0000000000000000000000000000000000000000000000000000000000000000" } # e.g. from address(0)
+]
+calldata = "0xdeadbeef"

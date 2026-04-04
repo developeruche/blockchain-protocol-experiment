@@ -1,0 +1,15 @@
+[global]
+rpc_http = "http://127.0.0.1:8545"
+rpc_ws   = "ws://127.0.0.1:8545"
+automate_contract = "0x851356ae760d987E095750cCeb3bC6014560891C"
+private_key_env   = "PRIVATE_KEY"
+chain_id          = 31337
+max_fee_per_gas_gwei     = 50
+max_priority_fee_gwei    = 2
+gas_limit                = 500_000
+
+[[automation]]
+id          = "0xfa9c5a0839d519f000b2e9be188b8ebc85a884041df25bd0d9fc085fae2f51cc"
+trigger     = "timeout"
+timeout_ms  = 2000                        
+calldata    = "0x000000000000000000000000000000000000000000000000000000000000002a"
