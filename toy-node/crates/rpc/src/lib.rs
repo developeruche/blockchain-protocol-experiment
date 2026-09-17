@@ -1,16 +1,17 @@
 mod handlers;
 
-
 use std::error::Error;
 
 use jsonrpsee::{
     RpcModule,
-    server::{ServerBuilder, ServerHandle}
+    server::{ServerBuilder, ServerHandle},
 };
 use primitives::constants::RPC_ADDRESS;
 
-use crate::handlers::{block_number_handler, chain_id_handler, get_balance_handler, get_block_by_hash_handler, get_block_by_number_handler, get_transaction_by_hash_handler, get_transaction_receipt_handler};
-
+use crate::handlers::{
+    block_number_handler, chain_id_handler, get_balance_handler, get_block_by_hash_handler,
+    get_block_by_number_handler, get_transaction_by_hash_handler, get_transaction_receipt_handler,
+};
 
 /// Binds the JSON-RPC server to port 8545, registers its methods, and starts it.
 pub async fn start_server() -> Result<ServerHandle, Box<dyn Error + Send + Sync>> {
@@ -49,10 +50,3 @@ pub async fn start_server() -> Result<ServerHandle, Box<dyn Error + Send + Sync>
 
     Ok(server.start(module))
 }
-
-
-
-
-
-
-

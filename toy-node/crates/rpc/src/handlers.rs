@@ -1,11 +1,9 @@
-use jsonrpsee::{
-    core::RpcResult,
-    types::Params,
+use jsonrpsee::{core::RpcResult, types::Params};
+use primitives::{
+    constants::{DUMMY_BLOCK_HASH, DUMMY_TX_HASH},
+    response::{BlockResponse, CHAIN_ID},
 };
-use primitives::{constants::{DUMMY_BLOCK_HASH, DUMMY_TX_HASH}, response::{Block, CHAIN_ID}};
 use serde_json::{Value, json};
-
-
 
 pub fn chain_id_handler() -> &'static str {
     CHAIN_ID
@@ -67,7 +65,7 @@ pub fn get_balance_handler(params: Params<'_>) -> RpcResult<&'static str> {
 }
 
 fn dummy_block(number: Value) -> Value {
-    let mut block = Block::default();
+    let mut block = BlockResponse::default();
     block.number = number.to_string();
     serde_json::to_value(block).unwrap()
 }
