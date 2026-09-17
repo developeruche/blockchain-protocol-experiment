@@ -1,0 +1,71 @@
+use jsonrpsee::{core::RpcResult, types::Params};
+use primitives::{
+    constants::{DUMMY_BLOCK_HASH, DUMMY_TX_HASH},
+    response::{BlockResponse, CHAIN_ID},
+};
+use serde_json::{Value, json};
+
+pub fn chain_id_handler() -> &'static str {
+    CHAIN_ID
+}
+
+pub fn block_number_handler() -> &'static str {
+    "0x0"
+}
+
+pub fn get_block_by_number_handler(params: Params<'_>) -> RpcResult<Value> {
+    let (block_number, _full_transactions): (String, bool) = params.parse()?;
+
+    Ok(dummy_block(Value::String(block_number)))
+}
+
+pub fn get_block_by_hash_handler(params: Params<'_>) -> RpcResult<Value> {
+    let (block_hash, _full_transactions): (String, bool) = params.parse()?;
+
+    let mut block = dummy_block(Value::String("0x0".to_owned()));
+    block["hash"] = Value::String(block_hash);
+
+    Ok(block)
+}
+
+pub fn get_transaction_by_hash_handler(params: Params<'_>) -> RpcResult<Value> {
+    let tx_hash: String = params.one()?;
+
+    if tx_hash != DUMMY_TX_HASH {
+        return Ok(Value::Null);
+    }
+
+    Ok(json!({
+         "hash": DUMMY_TX_HASH,
+         "blockHash": DUMMY_BLOCK_HASH,
+         "blockNumber": "0x0",
+         "from": "0x0000000000000000000000000000000000000000",
+         "to": "0x0000000000000000000000000000000000000000",
+         "value": "0x0"
+    }))
+}
+
+pub fn get_transaction_receipt_handler(params: Params<'_>) -> RpcResult<Value> {
+    let tx_hash: String = params.one()?;
+
+    if tx_hash != DUMMY_TX_HASH {
+        return Ok(Value::Null);
+    }
+
+    Ok(json!({
+        "transactionHash": tx_hash,
+        "status": "0x1"
+    }))
+}
+
+pub fn get_balance_handler(params: Params<'_>) -> RpcResult<&'static str> {
+    let (_address, _block_tag): (String, String) = params.parse()?;
+
+    Ok("0x0")
+}
+
+fn dummy_block(number: Value) -> Value {
+    let mut block = BlockResponse::default();
+    block.number = number.to_string();
+    serde_json::to_value(block).unwrap()
+}

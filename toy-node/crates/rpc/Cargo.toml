@@ -6,3 +6,6 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+jsonrpsee = { version = "0.26.0", features = ["server"] }
+serde_json.workspace = true
+primitives.workspace = true
