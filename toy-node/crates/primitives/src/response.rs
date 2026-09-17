@@ -24,7 +24,7 @@ pub struct BlockResponse {
 pub struct TransactionResponse {
     pub block_hash: String,
     pub block_number: String,
-    pub chain_id: String,
+    pub chain_id: String,   //quantity
     pub from: String,
     pub gas: String,
     pub gas_price: String, // Note: gas price would const

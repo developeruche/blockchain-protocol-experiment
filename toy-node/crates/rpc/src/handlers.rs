@@ -64,6 +64,38 @@ pub fn get_balance_handler(params: Params<'_>) -> RpcResult<&'static str> {
     Ok("0x0")
 }
 
+pub fn eth_getTransactionCount(params: Params<'_>) -> RpcResult<&'static str> {
+    let (_address, _block_tag): (String, String) = params.parse()?;
+
+    Ok("0x0")
+}
+
+pub fn eth_sendRawTransaction(params: Params<'_>) -> RpcResult<Value> {
+    let raw_txHash: String = params.one()?;
+
+    if raw_txHash != DUMMY_TX_HASH {
+        return Ok(Value::Null);
+    }
+
+    Ok(json!({
+        "transactionHash": raw_txHash,
+        "Status": "0x1",
+    }
+    ))
+}
+
+pub fn eth_call(params: Params<'_>) -> RpcResult<&'static str> {
+    let (_call_data, _block_tag) : (Value, String) = params.parse()?;
+
+    Ok("0x0")
+}
+
+pub fn  eth_estimateGas(params: Params<'_>) -> RpcResult<&'static str> {
+    let _call_data: Value = params.one()?;
+
+    Ok("0x5208")
+}
+
 fn dummy_block(number: Value) -> Value {
     let mut block = BlockResponse::default();
     block.number = number.to_string();
