@@ -517,6 +517,9 @@ dependencies = [
 [[package]]
 name = "primitives"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "proc-macro2"
@@ -621,6 +624,7 @@ name = "rpc"
 version = "0.1.0"
 dependencies = [
  "jsonrpsee",
+ "primitives",
  "serde_json",
 ]
 
