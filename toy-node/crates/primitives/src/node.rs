@@ -59,7 +59,21 @@ pub struct BlockState {
     transactions: HashMap<B256, Transaction>, // TODO: CLASS:: TransactionReceipt
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BreejaGenesis {
+    pub accounts: Vec<(Address, U256)>,
+}
+
+
 impl Account {
+    pub fn new(bal: U256) -> Self {
+        Self {
+            balance: bal,
+            ..Default::default()
+        }
+    }
+    
     pub fn increase_nonce(&mut self) -> u64 {
         let passed_nonce = self.nonce;
         self.nonce += 1;
@@ -83,7 +97,21 @@ impl Account {
 }
 
 impl BlockState {
-    pub fn new_with_gensis() {
-        todo!()
+    pub fn new_with_gensis(breeja_gen: BreejaGenesis) -> Self {
+        let mut gen_accounts = HashMap::new();
+        for (addr, amount) in breeja_gen.accounts {
+            gen_accounts.insert(addr, Account::new(amount));
+        }
+        
+        Self {
+            accounts: gen_accounts,
+            ..Default::default()
+        }
+    }
+
+    pub fn get_block_number(&self) -> usize {
+        self.blocks.len()
     }
 }
+
+

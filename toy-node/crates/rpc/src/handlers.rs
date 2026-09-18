@@ -5,12 +5,15 @@ use primitives::{
 };
 use serde_json::{Value, json};
 
+use crate::RPCContext;
+
 pub fn chain_id_handler() -> &'static str {
     CHAIN_ID
 }
 
-pub fn block_number_handler() -> &'static str {
-    "0x0"
+pub fn block_number_handler(rpc_context: &RPCContext) -> &'static str {
+    // &rpc_context.block_state.get_block_number().to_string()
+    todo!()
 }
 
 pub fn get_block_by_number_handler(params: Params<'_>) -> RpcResult<Value> {

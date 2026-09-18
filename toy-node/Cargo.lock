@@ -1324,6 +1324,8 @@ dependencies = [
 name = "breeja"
 version = "0.1.0"
 dependencies = [
+ "alloy",
+ "primitives",
  "rpc",
  "tokio",
 ]
