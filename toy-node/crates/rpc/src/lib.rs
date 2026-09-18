@@ -9,9 +9,9 @@ use jsonrpsee::{
 use primitives::constants::RPC_ADDRESS;
 
 use crate::handlers::{
-    block_number_handler, chain_id_handler, get_balance_handler, get_block_by_hash_handler,
+    block_number_handler, chain_id_handler, eth_call, eth_estimateGas, eth_getTransactionCount,
+    eth_sendRawTransaction, get_balance_handler, get_block_by_hash_handler,
     get_block_by_number_handler, get_transaction_by_hash_handler, get_transaction_receipt_handler,
-    eth_getTransactionCount, eth_sendRawTransaction, eth_call, eth_estimateGas,
 };
 
 /// Binds the JSON-RPC server to port 8545, registers its methods, and starts it.
@@ -49,22 +49,20 @@ pub async fn start_server() -> Result<ServerHandle, Box<dyn Error + Send + Sync>
         get_balance_handler(params)
     })?;
 
-    module.register_method("eth_getTransactionCount", |params, _context, _extensions| {
-        eth_getTransactionCount(params)
-    })?;
-    
+    module.register_method(
+        "eth_getTransactionCount",
+        |params, _context, _extensions| eth_getTransactionCount(params),
+    )?;
+
     module.register_method("eth_sendRawTransaction", |params, _context, _extensions| {
         eth_sendRawTransaction(params)
     })?;
-    
-    module.register_method("eth_call", |params, _context, _extensions| {
-        eth_call(params)
-    })?;
-    
+
+    module.register_method("eth_call", |params, _context, _extensions| eth_call(params))?;
+
     module.register_method("eth_estimateGas", |params, _context, _extensions| {
         eth_estimateGas(params)
     })?;
-    
 
     Ok(server.start(module))
 }

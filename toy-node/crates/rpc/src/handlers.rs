@@ -1,7 +1,7 @@
 use jsonrpsee::{core::RpcResult, types::Params};
 use primitives::{
     constants::{DUMMY_BLOCK_HASH, DUMMY_TX_HASH},
-    response::{BlockResponse, CHAIN_ID},
+    response::{BlockResponse, CHAIN_ID, TransactionReceiptResponse, TransactionResponse},
 };
 use serde_json::{Value, json};
 
@@ -35,14 +35,9 @@ pub fn get_transaction_by_hash_handler(params: Params<'_>) -> RpcResult<Value> {
         return Ok(Value::Null);
     }
 
-    Ok(json!({
-         "hash": DUMMY_TX_HASH,
-         "blockHash": DUMMY_BLOCK_HASH,
-         "blockNumber": "0x0",
-         "from": "0x0000000000000000000000000000000000000000",
-         "to": "0x0000000000000000000000000000000000000000",
-         "value": "0x0"
-    }))
+    let default_tx_response = TransactionResponse::default();
+
+    Ok(serde_json::to_value(default_tx_response).unwrap())
 }
 
 pub fn get_transaction_receipt_handler(params: Params<'_>) -> RpcResult<Value> {
@@ -52,10 +47,9 @@ pub fn get_transaction_receipt_handler(params: Params<'_>) -> RpcResult<Value> {
         return Ok(Value::Null);
     }
 
-    Ok(json!({
-        "transactionHash": tx_hash,
-        "status": "0x1"
-    }))
+    let default_tx_receipt = TransactionReceiptResponse::default();
+
+    Ok(serde_json::to_value(default_tx_receipt).unwrap())
 }
 
 pub fn get_balance_handler(params: Params<'_>) -> RpcResult<&'static str> {
@@ -85,12 +79,12 @@ pub fn eth_sendRawTransaction(params: Params<'_>) -> RpcResult<Value> {
 }
 
 pub fn eth_call(params: Params<'_>) -> RpcResult<&'static str> {
-    let (_call_data, _block_tag) : (Value, String) = params.parse()?;
+    let (_call_data, _block_tag): (Value, String) = params.parse()?;
 
     Ok("0x0")
 }
 
-pub fn  eth_estimateGas(params: Params<'_>) -> RpcResult<&'static str> {
+pub fn eth_estimateGas(params: Params<'_>) -> RpcResult<&'static str> {
     let _call_data: Value = params.one()?;
 
     Ok("0x5208")
