@@ -53,6 +53,23 @@ pub struct Transaction {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TransactionReceiptResponse {
+    pub block_hash: B256,
+    pub block_number: u64,
+    pub contract_address: Address,
+    pub cummulative_gas_used: U256,
+    pub effective_gas_price: U256,
+    pub from: Address,
+    pub gas_used: U256,
+    pub logs: Vec<B256>,
+    pub status: u8,
+    pub to: Address,
+    pub transaction_hash: B256,
+    pub transaction_index: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BlockState {
     accounts: HashMap<Address, Account>,
     blocks: Vec<Block>,
