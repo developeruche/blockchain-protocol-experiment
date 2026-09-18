@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use alloy::primitives::{Address, B256, Bytes, U256};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     nonce: u64,
@@ -14,7 +14,7 @@ pub struct Account {
     code_hash: B256,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Block {
     pub gas_limit: U256,
@@ -31,7 +31,7 @@ pub struct Block {
     pub transaction_root: B256,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Transaction {
     pub block_hash: B256,
@@ -51,7 +51,7 @@ pub struct Transaction {
     pub s: U256,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BlockState {
     accounts: HashMap<Address, Account>,
@@ -59,12 +59,11 @@ pub struct BlockState {
     transactions: HashMap<B256, Transaction>, // TODO: CLASS:: TransactionReceipt
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BreejaGenesis {
     pub accounts: Vec<(Address, U256)>,
 }
-
 
 impl Account {
     pub fn new(bal: U256) -> Self {
@@ -73,7 +72,7 @@ impl Account {
             ..Default::default()
         }
     }
-    
+
     pub fn increase_nonce(&mut self) -> u64 {
         let passed_nonce = self.nonce;
         self.nonce += 1;
@@ -102,7 +101,7 @@ impl BlockState {
         for (addr, amount) in breeja_gen.accounts {
             gen_accounts.insert(addr, Account::new(amount));
         }
-        
+
         Self {
             accounts: gen_accounts,
             ..Default::default()
@@ -112,6 +111,8 @@ impl BlockState {
     pub fn get_block_number(&self) -> usize {
         self.blocks.len()
     }
+
+    pub fn get_block(&self, block_number: usize) -> Block {
+        self.blocks[block_number].clone()
+    }
 }
-
-

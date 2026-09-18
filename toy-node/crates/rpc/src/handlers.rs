@@ -1,6 +1,6 @@
 use jsonrpsee::{core::RpcResult, types::Params};
 use primitives::{
-    constants::{DUMMY_BLOCK_HASH, DUMMY_TX_HASH},
+    constants::DUMMY_TX_HASH,
     response::{BlockResponse, CHAIN_ID, TransactionReceiptResponse, TransactionResponse},
 };
 use serde_json::{Value, json};
@@ -11,15 +11,20 @@ pub fn chain_id_handler() -> &'static str {
     CHAIN_ID
 }
 
-pub fn block_number_handler(rpc_context: &RPCContext) -> &'static str {
-    // &rpc_context.block_state.get_block_number().to_string()
-    todo!()
+pub fn block_number_handler(rpc_context: &RPCContext) -> String {
+    rpc_context.block_state.get_block_number().to_string()
 }
 
-pub fn get_block_by_number_handler(params: Params<'_>) -> RpcResult<Value> {
+pub fn get_block_by_number_handler(
+    params: Params<'_>,
+    rpc_context: &RPCContext,
+) -> RpcResult<Value> {
     let (block_number, _full_transactions): (String, bool) = params.parse()?;
 
-    Ok(dummy_block(Value::String(block_number)))
+    let blk_number: u64 = u64::from_str_radix(&block_number, 16).unwrap();
+    let block = rpc_context.block_state.get_block(blk_number as usize);
+
+    Ok(serde_json::to_value(block).unwrap())
 }
 
 pub fn get_block_by_hash_handler(params: Params<'_>) -> RpcResult<Value> {
