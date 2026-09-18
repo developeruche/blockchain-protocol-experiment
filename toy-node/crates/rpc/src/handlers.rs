@@ -1,6 +1,6 @@
 use jsonrpsee::{core::RpcResult, types::Params};
 use primitives::{
-    constants::DUMMY_TX_HASH,
+    constants::{DEV_ADDRESS, DUMMY_BLOCK_HASH, DUMMY_TX_HASH, ZERO_HASH},
     response::{BlockResponse, CHAIN_ID, TransactionReceiptResponse, TransactionResponse},
 };
 use serde_json::{Value, json};
@@ -30,10 +30,11 @@ pub fn get_block_by_number_handler(
 pub fn get_block_by_hash_handler(params: Params<'_>) -> RpcResult<Value> {
     let (block_hash, _full_transactions): (String, bool) = params.parse()?;
 
-    let mut block = dummy_block(Value::String("0x0".to_owned()));
-    block["hash"] = Value::String(block_hash);
+    if block_hash != DUMMY_BLOCK_HASH {
+        return Ok(Value::Null);
+    }
 
-    Ok(block)
+    Ok(serde_json::to_value(dummy_block()).unwrap())
 }
 
 pub fn get_transaction_by_hash_handler(params: Params<'_>) -> RpcResult<Value> {
@@ -43,9 +44,7 @@ pub fn get_transaction_by_hash_handler(params: Params<'_>) -> RpcResult<Value> {
         return Ok(Value::Null);
     }
 
-    let default_tx_response = TransactionResponse::default();
-
-    Ok(serde_json::to_value(default_tx_response).unwrap())
+    Ok(serde_json::to_value(dummy_transaction()).unwrap())
 }
 
 pub fn get_transaction_receipt_handler(params: Params<'_>) -> RpcResult<Value> {
@@ -98,8 +97,40 @@ pub fn eth_estimateGas(params: Params<'_>) -> RpcResult<&'static str> {
     Ok("0x5208")
 }
 
-fn dummy_block(number: Value) -> Value {
-    let mut block = BlockResponse::default();
-    block.number = number.to_string();
-    serde_json::to_value(block).unwrap()
+fn dummy_block() -> BlockResponse {
+    BlockResponse {
+        gas_limit: "0x1c9c380".to_owned(),
+        gas_used: "0x5208".to_owned(),
+        hash: DUMMY_BLOCK_HASH.to_owned(),
+        miner: DEV_ADDRESS.to_string(),
+        mix_hash: ZERO_HASH.to_owned(),
+        nonce: "0x0000000000000000".to_owned(),
+        number: "0x0".to_owned(),
+        parent_hash: ZERO_HASH.to_owned(),
+        size: "0x220".to_owned(),
+        state_root: ZERO_HASH.to_owned(),
+        // The dummy transaction below is the one transaction in this block.
+        transactions: vec![DUMMY_TX_HASH.to_owned()],
+        transaction_root: ZERO_HASH.to_owned(),
+    }
+}
+
+fn dummy_transaction() -> TransactionResponse {
+    TransactionResponse {
+        block_hash: DUMMY_BLOCK_HASH.to_owned(),
+        block_number: "0x0".to_owned(),
+        chain_id: CHAIN_ID.to_owned(),
+        from: DEV_ADDRESS.to_string(),
+        gas: "0x5208".to_owned(),
+        gas_price: "0x3b9aca00".to_owned(),
+        hash: DUMMY_TX_HASH.to_owned(),
+        input: "0x".to_owned(),
+        nonce: "0x0".to_owned(),
+        to: DEV_ADDRESS.to_string(),
+        value: "0x2386f26fc10000".to_owned(),
+        transaction_index: "0x0".to_owned(),
+        v: "0x1b".to_owned(),
+        r: "0x1b5e176d927f8e9ab405058b2d2457392da3e20f328b16ddabcebc33eaac5fea".to_owned(),
+        s: "0x4ba69724e8f69de52f0125ad8b3c5c2cef33019bac3249e2c0a2192766d1721c".to_owned(),
+    }
 }
