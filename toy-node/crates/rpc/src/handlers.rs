@@ -1,136 +1,295 @@
-use jsonrpsee::{core::RpcResult, types::Params};
-use primitives::{
-    constants::{DEV_ADDRESS, DUMMY_BLOCK_HASH, DUMMY_TX_HASH, ZERO_HASH},
-    response::{BlockResponse, CHAIN_ID, TransactionReceiptResponse, TransactionResponse},
+use alloy::primitives::{Address, B256, Bytes, U256};
+use jsonrpsee::{
+    core::RpcResult,
+    types::{ErrorObjectOwned, Params, error::ErrorCode},
 };
-use serde_json::{Value, json};
+use primitives::{
+    constants::{CHAIN_ID, GAS_PRICE, TRANSFER_GAS},
+    node::BlockState,
+    params::{BlockTag, CallRequest},
+    response::{
+        BlockResponse, TransactionReceiptResponse, TransactionResponse, data_hash, quantity,
+    },
+};
+use serde_json::Value;
 
 use crate::RPCContext;
 
-pub fn chain_id_handler() -> &'static str {
-    CHAIN_ID
+/// JSON-RPC error code Ethereum clients use for "your request was understood but
+/// is not valid", as opposed to a malformed one.
+const INVALID_INPUT: i32 = -32000;
+
+/// Turns an internal error into a JSON-RPC error object the client can read.
+fn invalid_input(error: impl std::fmt::Display) -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(INVALID_INPUT, error.to_string(), None::<()>)
 }
 
-pub fn block_number_handler(rpc_context: &RPCContext) -> String {
-    rpc_context.block_state.get_block_number().to_string()
+/// Error returned when a request needs the EVM this node does not have.
+fn no_evm(detail: &str) -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(
+        INVALID_INPUT,
+        format!("this node has no EVM and only processes ETH transfers: {detail}"),
+        None::<()>,
+    )
 }
 
-pub fn get_block_by_number_handler(
+fn invalid_params(error: impl std::fmt::Display) -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(
+        ErrorCode::InvalidParams.code(),
+        error.to_string(),
+        None::<()>,
+    )
+}
+
+/// Parses a 32-byte hash parameter.
+fn parse_hash(raw: &str) -> Result<B256, ErrorObjectOwned> {
+    raw.parse::<B256>()
+        .map_err(|e| invalid_params(format!("invalid 32-byte hash {raw:?}: {e}")))
+}
+
+/// Resolves a block tag against the chain head, erroring on a block that does not
+/// exist rather than silently substituting the latest one.
+fn resolve_tag(state: &BlockState, tag: &BlockTag) -> Result<u64, ErrorObjectOwned> {
+    tag.resolve(state.get_block_number()).map_err(invalid_input)
+}
+
+
+/// The chain's id, used by wallets for EIP-155 replay protection.
+pub fn chain_id_handler() -> String {
+    quantity(CHAIN_ID)
+}
+
+
+/// The number of the chain head. A freshly started node sits at `0x0`, the genesis
+/// block, and climbs from there as the miner seals blocks.
+pub fn block_number_handler(context: &RPCContext) -> String {
+    quantity(context.chain.read().get_block_number())
+}
+
+
+/// Renders a block, inlining full transaction objects if the caller asked for them.
+fn render_block(state: &BlockState, number: u64, full_transactions: bool) -> Value {
+    let Some(block) = state.get_block(number) else {
+        return Value::Null;
+    };
+
+    let transactions: Vec<Value> = if full_transactions {
+        block
+            .transactions
+            .iter()
+            .filter_map(|hash| state.get_transaction(hash))
+            .map(|tx| {
+                serde_json::to_value(TransactionResponse::from(tx))
+                    .expect("a transaction response always serializes")
+            })
+            .collect()
+    } else {
+        block
+            .transactions
+            .iter()
+            .map(|hash| Value::String(data_hash(hash)))
+            .collect()
+    };
+
+    serde_json::to_value(BlockResponse::from_block(block, transactions))
+        .expect("a block response always serializes")
+}
+
+pub fn get_block_by_number_handler(params: Params<'_>, context: &RPCContext) -> RpcResult<Value> {
+    // Ethereum's optional trailing parameters have to be read one at a time: a
+    // client may send just the block, or the block and the `fullTransactions`
+    // flag, and both are valid.
+    let mut sequence = params.sequence();
+    let tag: BlockTag = sequence.next()?;
+    let full_transactions = sequence.optional_next::<bool>()?.unwrap_or(false);
+
+    let state = context.chain.read();
+    let number = resolve_tag(&state, &tag)?;
+    Ok(render_block(&state, number, full_transactions))
+}
+
+pub fn get_block_by_hash_handler(params: Params<'_>, context: &RPCContext) -> RpcResult<Value> {
+    let mut sequence = params.sequence();
+    let hash = parse_hash(&sequence.next::<String>()?)?;
+    let full_transactions = sequence.optional_next::<bool>()?.unwrap_or(false);
+
+    let state = context.chain.read();
+    // An unknown hash is `null`, not an error: the caller asked a legitimate
+    // question and the answer is "no such block".
+    let Some(number) = state.get_block_by_hash(&hash).map(|block| block.number) else {
+        return Ok(Value::Null);
+    };
+    Ok(render_block(&state, number, full_transactions))
+}
+
+
+
+pub fn get_transaction_by_hash_handler(
     params: Params<'_>,
-    rpc_context: &RPCContext,
+    context: &RPCContext,
 ) -> RpcResult<Value> {
-    let (block_number, _full_transactions): (String, bool) = params.parse()?;
+    let hash = parse_hash(&params.one::<String>()?)?;
 
-    let blk_number: u64 = u64::from_str_radix(&block_number, 16).unwrap();
-    let block = rpc_context.block_state.get_block(blk_number as usize);
-
-    Ok(serde_json::to_value(block).unwrap())
-}
-
-pub fn get_block_by_hash_handler(params: Params<'_>) -> RpcResult<Value> {
-    let (block_hash, _full_transactions): (String, bool) = params.parse()?;
-
-    if block_hash != DUMMY_BLOCK_HASH {
-        return Ok(Value::Null);
-    }
-
-    Ok(serde_json::to_value(dummy_block()).unwrap())
-}
-
-pub fn get_transaction_by_hash_handler(params: Params<'_>) -> RpcResult<Value> {
-    let tx_hash: String = params.one()?;
-
-    if tx_hash != DUMMY_TX_HASH {
-        return Ok(Value::Null);
-    }
-
-    Ok(serde_json::to_value(dummy_transaction()).unwrap())
-}
-
-pub fn get_transaction_receipt_handler(params: Params<'_>) -> RpcResult<Value> {
-    let tx_hash: String = params.one()?;
-
-    if tx_hash != DUMMY_TX_HASH {
-        return Ok(Value::Null);
-    }
-
-    let default_tx_receipt = TransactionReceiptResponse::default();
-
-    Ok(serde_json::to_value(default_tx_receipt).unwrap())
-}
-
-pub fn get_balance_handler(params: Params<'_>) -> RpcResult<&'static str> {
-    let (_address, _block_tag): (String, String) = params.parse()?;
-
-    Ok("0x0")
-}
-
-pub fn eth_getTransactionCount(params: Params<'_>) -> RpcResult<&'static str> {
-    let (_address, _block_tag): (String, String) = params.parse()?;
-
-    Ok("0x0")
-}
-
-pub fn eth_sendRawTransaction(params: Params<'_>) -> RpcResult<Value> {
-    let raw_txHash: String = params.one()?;
-
-    if raw_txHash != DUMMY_TX_HASH {
-        return Ok(Value::Null);
-    }
-
-    Ok(json!({
-        "transactionHash": raw_txHash,
-        "Status": "0x1",
-    }
-    ))
-}
-
-pub fn eth_call(params: Params<'_>) -> RpcResult<&'static str> {
-    let (_call_data, _block_tag): (Value, String) = params.parse()?;
-
-    Ok("0x0")
-}
-
-pub fn eth_estimateGas(params: Params<'_>) -> RpcResult<&'static str> {
-    let _call_data: Value = params.one()?;
-
-    Ok("0x5208")
-}
-
-fn dummy_block() -> BlockResponse {
-    BlockResponse {
-        gas_limit: "0x1c9c380".to_owned(),
-        gas_used: "0x5208".to_owned(),
-        hash: DUMMY_BLOCK_HASH.to_owned(),
-        miner: DEV_ADDRESS.to_string(),
-        mix_hash: ZERO_HASH.to_owned(),
-        nonce: "0x0000000000000000".to_owned(),
-        number: "0x0".to_owned(),
-        parent_hash: ZERO_HASH.to_owned(),
-        size: "0x220".to_owned(),
-        state_root: ZERO_HASH.to_owned(),
-        // The dummy transaction below is the one transaction in this block.
-        transactions: vec![DUMMY_TX_HASH.to_owned()],
-        transaction_root: ZERO_HASH.to_owned(),
+    let state = context.chain.read();
+    match state.get_transaction(&hash) {
+        Some(tx) => Ok(serde_json::to_value(TransactionResponse::from(tx))
+            .expect("a transaction response always serializes")),
+        None => Ok(Value::Null),
     }
 }
 
-fn dummy_transaction() -> TransactionResponse {
-    TransactionResponse {
-        block_hash: DUMMY_BLOCK_HASH.to_owned(),
-        block_number: "0x0".to_owned(),
-        chain_id: CHAIN_ID.to_owned(),
-        from: DEV_ADDRESS.to_string(),
-        gas: "0x5208".to_owned(),
-        gas_price: "0x3b9aca00".to_owned(),
-        hash: DUMMY_TX_HASH.to_owned(),
-        input: "0x".to_owned(),
-        nonce: "0x0".to_owned(),
-        to: DEV_ADDRESS.to_string(),
-        value: "0x2386f26fc10000".to_owned(),
-        transaction_index: "0x0".to_owned(),
-        v: "0x1b".to_owned(),
-        r: "0x1b5e176d927f8e9ab405058b2d2457392da3e20f328b16ddabcebc33eaac5fea".to_owned(),
-        s: "0x4ba69724e8f69de52f0125ad8b3c5c2cef33019bac3249e2c0a2192766d1721c".to_owned(),
+/// A receipt exists only once a transaction has been mined. A transaction still
+/// sitting in the mempool correctly returns `null` here, which is exactly how a
+/// client polls for confirmation.
+pub fn get_transaction_receipt_handler(
+    params: Params<'_>,
+    context: &RPCContext,
+) -> RpcResult<Value> {
+    let hash = parse_hash(&params.one::<String>()?)?;
+
+    let state = context.chain.read();
+    match state.get_receipt(&hash) {
+        Some(receipt) => Ok(
+            serde_json::to_value(TransactionReceiptResponse::from(receipt))
+                .expect("a receipt response always serializes"),
+        ),
+        None => Ok(Value::Null),
     }
+}
+
+
+pub fn get_balance_handler(params: Params<'_>, context: &RPCContext) -> RpcResult<String> {
+    let mut sequence = params.sequence();
+    let address: Address = sequence.next()?;
+    let tag = sequence
+        .optional_next::<BlockTag>()?
+        .unwrap_or(BlockTag::Latest);
+
+    let state = context.chain.read();
+    let balance = match tag {
+        // "pending" means "after everything in the mempool lands", which is what a
+        // wallet wants before it builds the next transaction.
+        BlockTag::Pending => state.get_pending_balance(&address),
+        _ => {
+            let number = resolve_tag(&state, &tag)?;
+            state
+                .get_account_at(&address, number)
+                .map(|account| account.balance)
+                .unwrap_or(U256::ZERO)
+        }
+    };
+
+    Ok(quantity(balance))
+}
+
+/// The account's nonce: how many transactions it has sent.
+pub fn get_transaction_count_handler(
+    params: Params<'_>,
+    context: &RPCContext,
+) -> RpcResult<String> {
+    let mut sequence = params.sequence();
+    let address: Address = sequence.next()?;
+    let tag = sequence
+        .optional_next::<BlockTag>()?
+        .unwrap_or(BlockTag::Latest);
+
+    let state = context.chain.read();
+    let nonce = match tag {
+        BlockTag::Pending => state.get_pending_nonce(&address),
+        _ => {
+            let number = resolve_tag(&state, &tag)?;
+            state
+                .get_account_at(&address, number)
+                .map(|account| account.nonce)
+                .unwrap_or(0)
+        }
+    };
+
+    Ok(quantity(nonce))
+}
+
+
+/// Accepts a signed transaction, validates it, and queues it for mining.
+///
+/// The response is the transaction hash, returned the moment the transaction is
+/// *accepted* — not when it is mined. The client then polls
+/// `eth_getTransactionReceipt` until a receipt appears, which is the standard
+/// Ethereum confirmation flow.
+pub fn send_raw_transaction_handler(params: Params<'_>, context: &RPCContext) -> RpcResult<String> {
+    let raw: String = params.one()?;
+    let raw: Bytes = raw
+        .parse()
+        .map_err(|e| invalid_params(format!("raw transaction is not valid hex: {e}")))?;
+
+    let hash = context
+        .chain
+        .submit_raw_transaction(&raw)
+        .map_err(invalid_input)?;
+
+    Ok(data_hash(&hash))
+}
+
+
+/// Executes a read-only call.
+///
+/// On Ethereum this runs the EVM against current state and discards the result.
+/// Breeja has no EVM, so there are only two possible answers: a call with no
+/// calldata invokes no code and returns no data (`0x`), and a call *with* calldata
+/// is refused, because answering it honestly would require the interpreter this
+/// node omits.
+pub fn call_handler(params: Params<'_>, context: &RPCContext) -> RpcResult<String> {
+    let mut sequence = params.sequence();
+    let request: CallRequest = sequence.next()?;
+    let tag = sequence.optional_next::<BlockTag>()?;
+
+    // Validate the block tag even though the answer does not depend on state, so
+    // a caller asking about a nonexistent block gets told.
+    if let Some(tag) = tag {
+        resolve_tag(&context.chain.read(), &tag)?;
+    }
+
+    if request.needs_evm() {
+        return Err(no_evm(
+            "eth_call can only be answered for plain transfers, which return no data",
+        ));
+    }
+
+    Ok("0x".to_owned())
+}
+
+/// Estimates the gas a transaction would need.
+///
+/// Without an EVM there is exactly one kind of transaction to estimate, and its
+/// cost is a constant: 21,000 gas, the intrinsic cost of a transfer. Anything
+/// carrying calldata would need to be executed to be estimated, so it is refused.
+pub fn estimate_gas_handler(params: Params<'_>, context: &RPCContext) -> RpcResult<String> {
+    let mut sequence = params.sequence();
+    let request: CallRequest = sequence.next()?;
+    let tag = sequence.optional_next::<BlockTag>()?;
+
+    if let Some(tag) = tag {
+        resolve_tag(&context.chain.read(), &tag)?;
+    }
+
+    if request.needs_evm() {
+        return Err(no_evm(
+            "eth_estimateGas can only be answered for plain transfers, which always cost 21000 gas",
+        ));
+    }
+
+    // A transfer the sender cannot afford would never be mined, so estimating it
+    // is a client bug worth surfacing.
+    if let Some(from) = request.from {
+        let value = request.value.unwrap_or(U256::ZERO);
+        let fee = U256::from(TRANSFER_GAS) * U256::from(GAS_PRICE);
+        let available = context.chain.read().get_pending_balance(&from);
+        if available < value + fee {
+            return Err(invalid_input(format!(
+                "insufficient funds: {from} has {available} but the transfer needs {}",
+                value + fee
+            )));
+        }
+    }
+
+    Ok(quantity(TRANSFER_GAS))
 }

@@ -9,3 +9,12 @@ authors.workspace = true
 jsonrpsee = { version = "0.26.0", features = ["server"] }
 serde_json.workspace = true
 primitives.workspace = true
+node.workspace = true
+alloy.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+jsonrpsee = { version = "0.26.0", features = ["server", "http-client"] }
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "time"] }
+serde_json.workspace = true

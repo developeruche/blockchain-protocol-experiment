@@ -7,6 +7,10 @@ authors.workspace = true
 
 [dependencies]
 rpc = { version = "0.1.0", path = "../../crates/rpc" }
-tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
+node.workspace = true
 primitives.workspace = true
 alloy.workspace = true
+anyhow.workspace = true
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "signal"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true

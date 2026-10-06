@@ -1,14 +1,8 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+pub mod chain;
+pub mod executor;
+pub mod miner;
+pub mod pool;
+pub mod pow;
+pub mod testing;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use chain::{Chain, ChainConfig};

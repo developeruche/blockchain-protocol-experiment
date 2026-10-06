@@ -1,39 +1,42 @@
 mod handlers;
 
-use std::error::Error;
+use std::net::SocketAddr;
 
 use jsonrpsee::{
     RpcModule,
     server::{ServerBuilder, ServerHandle},
 };
-use primitives::{
-    constants::RPC_ADDRESS,
-    node::{BlockState, BreejaGenesis},
-};
+use node::Chain;
+use primitives::constants::RPC_ADDRESS;
 
 use crate::handlers::{
-    block_number_handler, chain_id_handler, eth_call, eth_estimateGas, eth_getTransactionCount,
-    eth_sendRawTransaction, get_balance_handler, get_block_by_hash_handler,
-    get_block_by_number_handler, get_transaction_by_hash_handler, get_transaction_receipt_handler,
+    block_number_handler, call_handler, chain_id_handler, estimate_gas_handler,
+    get_balance_handler, get_block_by_hash_handler, get_block_by_number_handler,
+    get_transaction_by_hash_handler, get_transaction_count_handler,
+    get_transaction_receipt_handler, send_raw_transaction_handler,
 };
 
+/// What every RPC handler is given access to: the live chain.
 pub struct RPCContext {
-    pub block_state: BlockState,
+    pub chain: Chain,
 }
 
 impl RPCContext {
-    pub fn new(genesis: BreejaGenesis) -> Self {
-        Self {
-            block_state: BlockState::new_with_gensis(genesis),
-        }
+    pub fn new(chain: Chain) -> Self {
+        Self { chain }
     }
 }
 
-/// Binds the JSON-RPC server to port 8545, registers its methods, and starts it.
+/// Binds the JSON-RPC server, registers its methods, and starts serving.
+///
+/// Returns the handle that controls the server and the address it actually bound
+/// to, which matters when `address` asked for port 0 and the OS chose one.
 pub async fn start_server(
     rpc_context: RPCContext,
-) -> Result<ServerHandle, Box<dyn Error + Send + Sync>> {
-    let server = ServerBuilder::default().build(RPC_ADDRESS).await?;
+    address: &str,
+) -> Result<(ServerHandle, SocketAddr), anyhow::Error> {
+    let server = ServerBuilder::default().build(address).await?;
+    let bound = server.local_addr()?;
     let mut module = RpcModule::new(rpc_context);
 
     module.register_method("eth_chainId", |_params, _context, _extensions| {
@@ -48,38 +51,51 @@ pub async fn start_server(
         get_block_by_number_handler(params, context)
     })?;
 
-    module.register_method("eth_getBlockByHash", |params, _context, _extensions| {
-        get_block_by_hash_handler(params)
+    module.register_method("eth_getBlockByHash", |params, context, _extensions| {
+        get_block_by_hash_handler(params, context)
     })?;
 
     module.register_method(
         "eth_getTransactionByHash",
-        |params, _context, _extensions| get_transaction_by_hash_handler(params),
+        |params, context, _extensions| get_transaction_by_hash_handler(params, context),
     )?;
 
     module.register_method(
         "eth_getTransactionReceipt",
-        |params, _context, _extensions| get_transaction_receipt_handler(params),
+        |params, context, _extensions| get_transaction_receipt_handler(params, context),
     )?;
 
-    module.register_method("eth_getBalance", |params, _context, _extensions| {
-        get_balance_handler(params)
+
+    module.register_method("eth_getBalance", |params, context, _extensions| {
+        get_balance_handler(params, context)
     })?;
 
-    module.register_method(
-        "eth_getTransactionCount",
-        |params, _context, _extensions| eth_getTransactionCount(params),
-    )?;
-
-    module.register_method("eth_sendRawTransaction", |params, _context, _extensions| {
-        eth_sendRawTransaction(params)
+    module.register_method("eth_getTransactionCount", |params, context, _extensions| {
+        get_transaction_count_handler(params, context)
     })?;
 
-    module.register_method("eth_call", |params, _context, _extensions| eth_call(params))?;
 
-    module.register_method("eth_estimateGas", |params, _context, _extensions| {
-        eth_estimateGas(params)
+    module.register_method("eth_sendRawTransaction", |params, context, _extensions| {
+        send_raw_transaction_handler(params, context)
     })?;
 
-    Ok(server.start(module))
+
+    module.register_method("eth_call", |params, context, _extensions| {
+        call_handler(params, context)
+    })?;
+
+    module.register_method("eth_estimateGas", |params, context, _extensions| {
+        estimate_gas_handler(params, context)
+    })?;
+
+    tracing::info!(
+        address = %bound,
+        methods = module.method_names().count(),
+        "JSON-RPC server listening"
+    );
+
+    Ok((server.start(module), bound))
 }
+
+/// The address the node binds to when none is given.
+pub const DEFAULT_RPC_ADDRESS: &str = RPC_ADDRESS;
