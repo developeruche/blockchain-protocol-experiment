@@ -6,3 +6,10 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+primitives.workspace = true
+alloy.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+alloy.workspace = true
