@@ -144,3 +144,9 @@ Deliberately Frontier-era, in `crates/primitives/src/constants.rs`:
 | Block reward | 5 ETH | As on Frontier and Homestead |
 | Target block time | 15s (2s with `--dev`) | |
 
+
+## Course documents
+
+- [ASSIGNMENT.md](./ASSIGNMENT.md) — the JSON-RPC exercise this node grew out of.
+- [FINAL-PROJECT.md](./FINAL-PROJECT.md) — the final project: give Breeja an EVM,
+  using [REVM](https://github.com/bluealloy/revm).
