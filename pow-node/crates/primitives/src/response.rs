@@ -1,11 +1,14 @@
 use std::fmt::LowerHex;
 
-use alloy::primitives::{Address, B256, Bytes};
+use alloy::{
+    consensus::EMPTY_OMMER_ROOT_HASH,
+    primitives::{Address, B256, Bloom, Bytes},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    constants::{EXTRA_DATA, TRANSFER_GAS},
-    node::{Block, Transaction, TransactionReceipt},
+    constants::EXTRA_DATA,
+    node::{Block, Log, Transaction, TransactionReceipt, logs_bloom},
 };
 
 /// Encodes a number as an Ethereum *quantity*: minimal hex, `0x0` for zero.
@@ -30,6 +33,11 @@ pub fn data_address(address: &Address) -> String {
 /// Encodes a 32-byte hash as lowercase hex.
 pub fn data_hash(hash: &B256) -> String {
     format!("{hash:#x}")
+}
+
+/// Encodes a 2048-bit logs bloom as 256 bytes of lowercase hex.
+pub fn data_bloom(bloom: &Bloom) -> String {
+    format!("0x{}", alloy::hex::encode(bloom))
 }
 
 /// Encodes a byte string as lowercase hex, `0x` when empty.
@@ -60,6 +68,17 @@ pub struct BlockResponse {
     /// Transaction hashes, or full transaction objects when the caller asked for
     /// them with the `fullTransactions` flag.
     pub transactions: Vec<serde_json::Value>,
+    // The three fields below are part of every Ethereum header, and clients such
+    // as cast refuse to parse a block without them. Breeja has no uncles and no
+    // Ethash, so each reports the honest empty value rather than being omitted.
+    /// The hash of an empty uncle list: Breeja never includes uncles.
+    #[serde(rename = "sha3Uncles")]
+    pub sha3_uncles: String,
+    pub uncles: Vec<String>,
+    /// Zero: Breeja's proof of work is a plain keccak search with no Ethash mix.
+    pub mix_hash: String,
+    /// Bloom filter over every log in the block.
+    pub logs_bloom: String,
 }
 
 /// A transaction, as `eth_getTransactionByHash` returns it.
@@ -72,7 +91,8 @@ pub struct TransactionResponse {
     pub transaction_index: String,
     pub chain_id: String,
     pub from: String,
-    pub to: String,
+    /// `null` for a contract deployment.
+    pub to: Option<String>,
     pub value: String,
     pub nonce: String,
     pub gas: String,
@@ -95,19 +115,36 @@ pub struct TransactionReceiptResponse {
     pub block_hash: String,
     pub block_number: String,
     pub from: String,
-    pub to: String,
+    /// `null` for a contract deployment.
+    pub to: Option<String>,
     pub gas_used: String,
-    pub cummulative_gas_used: String,
+    /// Was misspelled `cummulativeGasUsed`, which standard clients such as cast
+    /// could not parse a receipt without.
+    pub cumulative_gas_used: String,
     pub effective_gas_price: String,
-    /// Always `null`: deploying a contract needs an EVM, so Breeja rejects it.
+    /// The created contract for a successful deployment, otherwise `null`.
     pub contract_address: Option<String>,
-    /// Always empty: logs are emitted by the `LOG*` opcodes, and there is no EVM
-    /// to execute them.
-    pub logs: Vec<serde_json::Value>,
+    pub logs: Vec<LogResponse>,
     pub logs_bloom: String,
     pub status: String,
     #[serde(rename = "type")]
     pub tx_type: String,
+}
+
+/// A log, as receipts and `eth_getLogs` return it.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogResponse {
+    pub address: String,
+    pub topics: Vec<String>,
+    pub data: String,
+    pub block_hash: String,
+    pub block_number: String,
+    pub transaction_hash: String,
+    pub transaction_index: String,
+    pub log_index: String,
+    /// Always `false`: Breeja has no reorgs, so a log is never un-emitted.
+    pub removed: bool,
 }
 
 impl BlockResponse {
@@ -133,6 +170,10 @@ impl BlockResponse {
             nonce: data_u64(block.nonce),
             size: quantity(block_size(block)),
             transactions,
+            sha3_uncles: data_hash(&EMPTY_OMMER_ROOT_HASH),
+            uncles: Vec::new(),
+            mix_hash: data_hash(&B256::ZERO),
+            logs_bloom: data_bloom(&block.logs_bloom),
         }
     }
 }
@@ -146,7 +187,7 @@ impl From<&Transaction> for TransactionResponse {
             transaction_index: quantity(tx.transaction_index),
             chain_id: quantity(tx.chain_id),
             from: data_address(&tx.from),
-            to: data_address(&tx.to),
+            to: tx.to.as_ref().map(data_address),
             value: quantity(tx.value),
             nonce: quantity(tx.nonce),
             gas: quantity(tx.gas),
@@ -168,16 +209,31 @@ impl From<&TransactionReceipt> for TransactionReceiptResponse {
             block_hash: data_hash(&receipt.block_hash),
             block_number: quantity(receipt.block_number),
             from: data_address(&receipt.from),
-            to: data_address(&receipt.to),
+            to: receipt.to.as_ref().map(data_address),
             gas_used: quantity(receipt.gas_used),
-            cummulative_gas_used: quantity(receipt.cummulative_gas_used),
+            cumulative_gas_used: quantity(receipt.cumulative_gas_used),
             effective_gas_price: quantity(receipt.effective_gas_price),
-            contract_address: None,
-            logs: Vec::new(),
-            // A bloom filter over no logs is 256 zero bytes.
-            logs_bloom: format!("0x{}", "00".repeat(256)),
+            contract_address: receipt.contract_address.as_ref().map(data_address),
+            logs: receipt.logs.iter().map(LogResponse::from).collect(),
+            logs_bloom: data_bloom(&logs_bloom(&receipt.logs)),
             status: quantity(receipt.status),
             tx_type: "0x0".to_owned(),
+        }
+    }
+}
+
+impl From<&Log> for LogResponse {
+    fn from(log: &Log) -> Self {
+        Self {
+            address: data_address(&log.address),
+            topics: log.topics.iter().map(data_hash).collect(),
+            data: data_bytes(&log.data),
+            block_hash: data_hash(&log.block_hash),
+            block_number: quantity(log.block_number),
+            transaction_hash: data_hash(&log.transaction_hash),
+            transaction_index: quantity(log.transaction_index),
+            log_index: quantity(log.log_index),
+            removed: false,
         }
     }
 }
@@ -192,10 +248,6 @@ fn block_size(block: &Block) -> u64 {
     const TX_BYTES: u64 = 110;
     HEADER_BYTES + EXTRA_DATA.len() as u64 + block.transactions.len() as u64 * TX_BYTES
 }
-
-/// Gas a plain transfer costs. Returned by `eth_estimateGas`, where it is the
-/// only answer a node without an EVM can give.
-pub const TRANSFER_GAS_ESTIMATE: u64 = TRANSFER_GAS;
 
 #[cfg(test)]
 mod tests {

@@ -84,9 +84,30 @@ must never hold real funds.**
 
 ## Sending a transaction
 
-Breeja does not implement `eth_gasPrice`, so `cast send` cannot auto-fill its
-parameters. Build and sign the transaction offline with `cast mktx`, then submit
-the raw bytes.
+Breeja serves `eth_gasPrice`, so `cast send` fills in the price, nonce and gas
+itself:
+
+```bash
+export ETH_RPC_URL=http://127.0.0.1:8545
+PK=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+
+# a transfer
+cast send --legacy --private-key $PK 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 --value 1ether
+
+# deploy a contract (this one stores 42 in slot 0 and emits a log when called)
+cast send --legacy --private-key $PK --create 0x600b600c600039600b6000f3602a60005560006000a000
+
+# call it, then inspect it
+cast send --legacy --private-key $PK <CONTRACT_ADDRESS>
+cast code <CONTRACT_ADDRESS>
+cast storage <CONTRACT_ADDRESS> 0
+cast logs --address <CONTRACT_ADDRESS> --from-block 0
+```
+
+### Without cast send
+
+You can also build and sign the transaction offline with `cast mktx`, then
+submit the raw bytes yourself.
 
 ```bash
 RAW=$(cast mktx --legacy \
@@ -111,9 +132,30 @@ curl -s -X POST http://localhost:8545 -H 'Content-Type: application/json' \
 A `null` receipt means "not mined yet" — which is exactly how every Ethereum
 client waits for confirmation.
 
+## Deploying a Solidity contract: the demo
+
+```bash
+./demo/demo.sh
+```
+
+[demo/demo.sh](demo/demo.sh) deploys [demo/Counter.sol](demo/Counter.sol) with
+`forge create`, then works through it with `cast`: read with `eth_call`, estimate
+and send `increment()`, read the storage slot, find the event with `eth_getLogs`
+(including by its indexed topic), show that `eth_call` keeps nothing, and finally
+mine a transaction that reverts — status `0x0`, gas still paid, nonce still used.
+Every step checks its result, and the script exits non-zero on the first surprise.
+
+It uses the node at `$ETH_RPC_URL` (default `127.0.0.1:8545`), or builds and
+starts a `--dev` node itself if none is running, and stops it afterwards. It
+needs [Foundry](https://getfoundry.sh) and `jq`.
+
+[demo/foundry.toml](demo/foundry.toml) pins `evm_version = "shanghai"`. That is
+not optional: newer EVM versions make `solc` emit Cancun opcodes such as `MCOPY`,
+which a Shanghai node rejects.
+
 ## The JSON-RPC API
 
-The same eleven methods from the assignment, now backed by real state.
+The eleven methods from the assignment, plus the four a node with an EVM needs.
 
 | Method | Behaviour |
 | --- | --- |
@@ -125,24 +167,30 @@ The same eleven methods from the assignment, now backed by real state.
 | `eth_getTransactionReceipt` | Receipts for mined transactions; `null` while pending |
 | `eth_getBalance` | Balance at any historical block, or `pending` |
 | `eth_getTransactionCount` | Nonce; `pending` includes queued transactions |
-| `eth_sendRawTransaction` | Validates and queues a signed transfer |
-| `eth_call` | `0x` for a plain transfer; **error** if it needs the EVM |
-| `eth_estimateGas` | `0x5208` (21000); **error** if it needs the EVM |
+| `eth_sendRawTransaction` | Validates and queues a signed transfer, deployment or contract call |
+| `eth_call` | Executes against any block's state and discards the changes; a revert is error code `3` with the revert data |
+| `eth_estimateGas` | Executes to find the smallest gas limit that succeeds; exactly `0x5208` for a transfer |
+| `eth_gasPrice` | `0x3b9aca00` (1 gwei, fixed) |
+| `eth_getCode` | Runtime code at an address and block; `0x` if none |
+| `eth_getStorageAt` | One storage slot as a 32-byte word |
+| `eth_getLogs` | Logs by block range or `blockHash`, `address` (one or many) and `topics` (with `null` wildcards and OR-lists) |
 
 Anything else returns `-32601 Method not found`.
 
 ## Chain parameters
 
-Deliberately Frontier-era, in `crates/primitives/src/constants.rs`:
+Deliberately Frontier-era consensus, in `crates/primitives/src/constants.rs`,
+with Shanghai-era execution so that modern Solidity runs:
 
 | Parameter | Value | Note |
 | --- | --- | --- |
 | Chain ID | 1 | |
-| Gas price | 1 gwei, fixed | No fee market; no EIP-1559 |
-| Transfer cost | 21,000 gas | The only cost there is |
-| Block gas limit | 3,141,592 | Frontier's "pi million" — 149 transfers per block |
+| Gas price | 1 gwei, fixed | No fee market, no EIP-1559: the basefee is 0 and nothing is burned |
+| Transfer cost | 21,000 gas | Contract calls and deployments cost whatever the EVM measures |
+| Block gas limit | 3,141,592 | Frontier's "pi million"; blocks fill by gas actually used |
 | Block reward | 5 ETH | As on Frontier and Homestead |
 | Target block time | 15s (2s with `--dev`) | |
+| EVM rules | Shanghai (REVM) | Compile Solidity with `--evm-version shanghai` |
 
 
 ## Course documents
