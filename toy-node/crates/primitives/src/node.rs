@@ -1,16 +1,16 @@
 use std::collections::HashMap;
 
-use alloy::primitives::{Address, B256, Bytes, U256, keccak256};
+use alloy::primitives::{Address, B256, Bytes, TxKind, U256, keccak256};
 use alloy_rlp::{Encodable, RlpEncodable};
 use serde::{Deserialize, Serialize};
 
 use crate::constants::{
     BLOCK_GAS_LIMIT, EXTRA_DATA, GAS_PRICE, MAX_DIFFICULTY_LEADING_ZEROS,
-    MIN_DIFFICULTY_LEADING_ZEROS, TRANSFER_GAS,
+    MIN_DIFFICULTY_LEADING_ZEROS,
 };
 
-/// An externally owned account: Ethereum's account record, minus everything a
-/// contract would need.
+/// Account state used by Breeja, including directly stored contract storage.
+/// Contract bytecode is kept in `BlockState` and referenced by `code_hash`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, RlpEncodable)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
@@ -18,6 +18,13 @@ pub struct Account {
     pub balance: U256,
     pub storage_root: B256,
     pub code_hash: B256,
+    /// Contract storage values keyed by their 256-bit slot.
+    ///
+    /// This teaching node stores the slots directly. `storage_root` is a
+    /// deterministic hash of these entries, not an Ethereum storage trie root.
+    #[serde(default)]
+    #[rlp(skip)]
+    pub storage: HashMap<U256, U256>,
 }
 
 /// A sealed block.
@@ -75,8 +82,7 @@ pub struct BlockHeader {
 
 /// A transaction that has been included in a block.
 ///
-/// `input` is always empty: Breeja rejects anything with calldata, because it
-/// has no EVM to run it with.
+/// `input` is empty for a transfer, calldata for a call, or initcode for creation.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Transaction {
@@ -86,7 +92,8 @@ pub struct Transaction {
     pub transaction_index: u64,
     pub chain_id: u64,
     pub from: Address,
-    pub to: Address,
+    /// `None` for a contract-creation transaction.
+    pub to: Option<Address>,
     pub value: U256,
     pub nonce: u64,
     pub gas: u64,
@@ -106,13 +113,52 @@ pub struct TransactionReceipt {
     pub block_hash: B256,
     pub block_number: u64,
     pub from: Address,
-    pub to: Address,
+    /// `None` for a contract-creation transaction.
+    pub to: Option<Address>,
+    /// Set only when a contract creation succeeds.
+    pub contract_address: Option<Address>,
+    /// Logs from successful execution. Logs from reverts and halts are discarded.
+    pub logs: Vec<Log>,
     pub gas_used: u64,
     pub cummulative_gas_used: u64,
     pub effective_gas_price: u128,
-    /// `1` for success. Breeja only ever includes transactions it has already
-    /// validated, so a receipt is never a failure.
+    /// `1` for success and `0` for a valid transaction that reverted or halted.
     pub status: u8,
+}
+
+/// An EVM log retained on a transaction receipt.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Log {
+    pub address: Address,
+    pub topics: Vec<B256>,
+    pub data: Bytes,
+}
+
+/// Builds Ethereum's 2048-bit log bloom for a receipt.
+///
+/// Each log address and topic contributes three bits. The bit positions are
+/// taken from the first six bytes of the value's Keccak-256 hash, exactly as
+/// specified by the Ethereum Yellow Paper.
+pub fn logs_bloom(logs: &[Log]) -> [u8; 256] {
+    let mut bloom = [0u8; 256];
+
+    for log in logs {
+        accrue_bloom(&mut bloom, log.address.as_slice());
+        for topic in &log.topics {
+            accrue_bloom(&mut bloom, topic.as_slice());
+        }
+    }
+
+    bloom
+}
+
+fn accrue_bloom(bloom: &mut [u8; 256], value: &[u8]) {
+    let hash = keccak256(value);
+    for offset in [0, 2, 4] {
+        let bit = (u16::from_be_bytes([hash[offset], hash[offset + 1]]) & 0x07ff) as usize;
+        bloom[255 - bit / 8] |= 1 << (bit % 8);
+    }
 }
 
 /// A transaction that has been accepted into the mempool but not yet mined.
@@ -120,7 +166,10 @@ pub struct TransactionReceipt {
 pub struct PendingTransaction {
     pub hash: B256,
     pub from: Address,
-    pub to: Address,
+    /// Preserves contract creation explicitly instead of using a sentinel address.
+    pub to: TxKind,
+    /// Empty for transfers, initcode for creation, or calldata for a call.
+    pub input: Bytes,
     pub value: U256,
     pub nonce: u64,
     pub gas: u64,
@@ -145,6 +194,8 @@ pub struct BreejaGenesis {
 pub struct BlockState {
     /// Account state as of the chain head.
     accounts: HashMap<Address, Account>,
+    /// Bytecode is stored once and accounts refer to it by `code_hash`.
+    code_by_hash: HashMap<B256, Bytes>,
     /// Blocks by number; `blocks[n]` is the block with `number == n`.
     blocks: Vec<Block>,
     /// Account state as it was *after* each block, so historical balance and
@@ -199,6 +250,23 @@ impl Account {
                 Ok(self.balance)
             }
             None => anyhow::bail!("balance overflow crediting {}", amount),
+        }
+    }
+
+    /// Hashes the current storage map in sorted slot order.
+    pub fn storage_root(&self) -> B256 {
+        let mut slots: Vec<_> = self.storage.iter().collect();
+        slots.sort_by_key(|(slot, _)| **slot);
+
+        let mut encoded = Vec::new();
+        for (slot, value) in slots {
+            slot.encode(&mut encoded);
+            value.encode(&mut encoded);
+        }
+        if encoded.is_empty() {
+            B256::ZERO
+        } else {
+            keccak256(encoded)
         }
     }
 }
@@ -296,6 +364,8 @@ pub fn state_root_of(accounts: &HashMap<Address, Account>) -> B256 {
     let mut buf = Vec::new();
     for (address, account) in entries {
         buf.extend_from_slice(address.as_slice());
+        let mut account = account.clone();
+        account.storage_root = account.storage_root();
         account.encode(&mut buf);
     }
     keccak256(buf)
@@ -401,12 +471,65 @@ impl BlockState {
         self.receipts.get(hash)
     }
 
-    // account queries 
+    // account queries
 
     /// Account at the chain head. An address nobody has ever funded reads as an
     /// empty account rather than an error, exactly as on Ethereum.
     pub fn get_account(&self, address: &Address) -> Account {
         self.accounts.get(address).cloned().unwrap_or_default()
+    }
+
+    /// Returns bytecode associated with an account. An unknown address returns
+    /// `None`; a known account with no code returns empty bytes.
+    pub fn get_code(&self, address: &Address) -> Option<Bytes> {
+        let account = self.accounts.get(address)?;
+        if account.code_hash == B256::ZERO {
+            return Some(Bytes::new());
+        }
+        self.get_code_by_hash(&account.code_hash)
+    }
+
+    /// Returns the code associated with an account at a historical block.
+    /// Code is content-addressed and retained, while the account snapshot tells
+    /// us which code hash was active at that block.
+    pub fn get_code_at(&self, address: &Address, number: u64) -> Option<Bytes> {
+        let account = self.get_account_at(address, number)?;
+        if account.code_hash == B256::ZERO {
+            return Some(Bytes::new());
+        }
+        self.get_code_by_hash(&account.code_hash)
+    }
+
+    /// Returns bytecode by its content hash. The zero hash and Ethereum's empty
+    /// code hash both represent empty code; an unknown non-empty hash returns
+    /// `None`.
+    pub fn get_code_by_hash(&self, code_hash: &B256) -> Option<Bytes> {
+        if *code_hash == B256::ZERO || *code_hash == keccak256([]) {
+            return Some(Bytes::new());
+        }
+        self.code_by_hash.get(code_hash).cloned()
+    }
+
+    /// Stores bytecode once by content hash and associates it with `address`.
+    pub fn set_code(&mut self, address: Address, code: Bytes) -> B256 {
+        let code_hash = keccak256(&code);
+        self.code_by_hash.insert(code_hash, code);
+        self.accounts.entry(address).or_default().code_hash = code_hash;
+        code_hash
+    }
+
+    /// Returns a storage slot's value, or zero for an unknown account or slot.
+    pub fn get_storage(&self, address: &Address, slot: &U256) -> U256 {
+        self.accounts
+            .get(address)
+            .and_then(|account| account.storage.get(slot).copied())
+            .unwrap_or_default()
+    }
+
+    /// Returns a storage slot from the account snapshot after `number`.
+    pub fn get_storage_at(&self, address: &Address, slot: &U256, number: u64) -> Option<U256> {
+        self.get_account_at(address, number)
+            .map(|account| account.storage.get(slot).copied().unwrap_or_default())
     }
 
     /// Account as it was after block `number`, or `None` if that block does not
@@ -449,6 +572,19 @@ impl BlockState {
         self.accounts.clone()
     }
 
+    /// A copy of the content-addressed bytecode cache for EVM execution.
+    pub fn code_snapshot(&self) -> HashMap<B256, Bytes> {
+        self.code_by_hash.clone()
+    }
+
+    /// Block hashes indexed by block number for REVM's `BLOCKHASH` lookup.
+    pub fn block_hashes_snapshot(&self) -> HashMap<u64, B256> {
+        self.blocks
+            .iter()
+            .map(|block| (block.number, block.hash))
+            .collect()
+    }
+
     // mempool
 
     pub fn add_to_mempool(&mut self, tx: PendingTransaction) {
@@ -471,8 +607,10 @@ impl BlockState {
     /// This does not remove them. The miner may spend a long time failing to seal
     /// a block, and a transaction must stay pending until it is actually mined.
     pub fn peek_mempool_batch(&self) -> Vec<PendingTransaction> {
-        let max_txs = (BLOCK_GAS_LIMIT / TRANSFER_GAS) as usize;
-        self.mempool.iter().take(max_txs).cloned().collect()
+        // Gas use is only known after EVM execution. The executor considers the
+        // pending transactions in arrival order and commits each one only when
+        // its actual gas use still fits in the block.
+        self.mempool.clone()
     }
 
     // block production
@@ -486,6 +624,7 @@ impl BlockState {
     pub fn commit_block(
         &mut self,
         accounts: HashMap<Address, Account>,
+        code_by_hash: HashMap<B256, Bytes>,
         block: Block,
         transactions: Vec<Transaction>,
         receipts: Vec<TransactionReceipt>,
@@ -495,6 +634,7 @@ impl BlockState {
             .retain(|pending| !mined.contains(&pending.hash));
 
         self.accounts = accounts;
+        self.code_by_hash.extend(code_by_hash);
         self.block_index.insert(block.hash, block.number);
         for tx in transactions {
             self.transactions.insert(tx.hash, tx);
@@ -514,6 +654,8 @@ impl BlockState {
 
 #[cfg(test)]
 mod tests {
+    use crate::constants::TRANSFER_GAS;
+
     use super::*;
 
     #[test]
@@ -601,6 +743,78 @@ mod tests {
     }
 
     #[test]
+    fn the_state_root_commits_to_storage_slots() {
+        let address = Address::repeat_byte(0x03);
+        let mut empty = HashMap::new();
+        empty.insert(address, Account::default());
+
+        let mut with_storage = empty.clone();
+        with_storage
+            .get_mut(&address)
+            .unwrap()
+            .storage
+            .insert(U256::from(4), U256::from(9));
+
+        assert_ne!(state_root_of(&empty), state_root_of(&with_storage));
+    }
+
+    #[test]
+    fn the_state_root_commits_to_contract_code() {
+        let address = Address::repeat_byte(0x04);
+        let mut first = HashMap::new();
+        first.insert(address, Account::default());
+
+        let mut second = first.clone();
+        second.get_mut(&address).unwrap().code_hash = keccak256([0x60, 0x00]);
+
+        assert_ne!(state_root_of(&first), state_root_of(&second));
+    }
+
+    #[test]
+    fn a_log_bloom_contains_the_address_and_every_topic() {
+        let address = Address::repeat_byte(0x11);
+        let topic_a = B256::repeat_byte(0x22);
+        let topic_b = B256::repeat_byte(0x33);
+        let bloom = logs_bloom(&[Log {
+            address,
+            topics: vec![topic_a, topic_b],
+            data: Bytes::from_static(&[0xaa]),
+        }]);
+
+        assert_ne!(bloom, [0u8; 256]);
+        for value in [address.as_slice(), topic_a.as_slice(), topic_b.as_slice()] {
+            let hash = keccak256(value);
+            for offset in [0, 2, 4] {
+                let bit = (u16::from_be_bytes([hash[offset], hash[offset + 1]]) & 0x07ff) as usize;
+                assert_ne!(bloom[255 - bit / 8] & (1 << (bit % 8)), 0);
+            }
+        }
+        assert_eq!(logs_bloom(&[]), [0u8; 256]);
+    }
+
+    #[test]
+    fn code_and_storage_accessors_have_deliberate_missing_value_semantics() {
+        let address = Address::repeat_byte(0x04);
+        let missing_address = Address::repeat_byte(0x05);
+        let mut state = BlockState::new_with_gensis(
+            BreejaGenesis {
+                accounts: vec![(address, U256::from(1))],
+            },
+            8,
+        );
+
+        assert_eq!(state.get_code(&address), Some(Bytes::new()));
+        assert_eq!(state.get_code(&missing_address), None);
+        assert_eq!(state.get_storage(&missing_address, &U256::ZERO), U256::ZERO);
+
+        let code = Bytes::from_static(&[0x60, 0x2a, 0x00]);
+        let code_hash = state.set_code(address, code.clone());
+        assert_eq!(state.get_code(&address), Some(code.clone()));
+        assert_eq!(state.get_code_by_hash(&code_hash), Some(code));
+        assert_eq!(state.get_code_by_hash(&B256::repeat_byte(0xff)), None);
+    }
+
+    #[test]
     fn pending_nonce_and_balance_account_for_what_is_already_queued() {
         let sender = Address::repeat_byte(0x11);
         let one_eth = U256::from(10u64).pow(U256::from(18));
@@ -614,7 +828,8 @@ mod tests {
         state.add_to_mempool(PendingTransaction {
             hash: B256::repeat_byte(0xaa),
             from: sender,
-            to: Address::repeat_byte(0x22),
+            to: TxKind::Call(Address::repeat_byte(0x22)),
+            input: Bytes::new(),
             value: one_eth,
             nonce: 0,
             gas: TRANSFER_GAS,

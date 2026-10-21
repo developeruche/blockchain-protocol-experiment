@@ -1,15 +1,27 @@
 use std::collections::HashMap;
 
-use alloy::primitives::{Address, B256, U256};
+use alloy::primitives::{Address, B256, Bytes, U256};
 use primitives::{
-    constants::{BLOCK_REWARD, TRANSFER_GAS},
-    node::{Account, PendingTransaction, Transaction, TransactionReceipt, hash_list_root},
+    constants::{BLOCK_GAS_LIMIT, BLOCK_REWARD, CHAIN_ID},
+    node::{
+        Account, Block, Log, PendingTransaction, Transaction, TransactionReceipt, hash_list_root,
+    },
 };
+use revm::{
+    Context, DatabaseCommit, ExecuteEvm, MainBuilder, MainContext,
+    context::{BlockEnv, CfgEnv, TxEnv},
+    context_interface::result::ExecutionResult,
+    primitives::{TxKind, hardfork::SpecId},
+};
+
+use crate::evm::BreejaDb;
 
 /// What executing a batch of transactions produced.
 pub struct Execution {
     /// Account state after the batch, ready to become the new head state.
     pub accounts: HashMap<Address, Account>,
+    /// Content-addressed bytecode after execution.
+    pub code_by_hash: HashMap<B256, Bytes>,
     pub transactions: Vec<Transaction>,
     pub receipts: Vec<TransactionReceipt>,
     pub gas_used: u64,
@@ -18,49 +30,105 @@ pub struct Execution {
     pub state_root: B256,
 }
 
-/// Applies one ETH transfer to the account state.
-///
-/// Returns the gas used, which for a transfer is always the intrinsic cost: there
-/// is no code to execute, so there is nothing else to charge for.
-///
-/// The ETH does not balance to zero across this function by design — the sender
-/// pays `value + fee`, the recipient receives `value`, and the miner receives
-/// `fee`. Nothing is created or destroyed.
-pub fn apply_transfer(
-    accounts: &mut HashMap<Address, Account>,
+/// Executes one pending legacy transaction through REVM and commits its changes
+/// into the owned database snapshot.
+pub fn execute_transaction(
+    db: &mut BreejaDb,
     tx: &PendingTransaction,
-    miner: Address,
-) -> Result<u64, anyhow::Error> {
-    let fee = U256::from(TRANSFER_GAS) * U256::from(tx.gas_price);
-    let total = tx
-        .value
-        .checked_add(fee)
-        .ok_or_else(|| anyhow::anyhow!("transaction cost overflows a U256"))?;
+    block: BlockEnv,
+) -> Result<ExecutionResult, anyhow::Error> {
+    let cfg = execution_cfg();
+    let tx_env = pending_tx_env(tx);
 
-    let sender = accounts.entry(tx.from).or_default();
-    if sender.nonce != tx.nonce {
-        anyhow::bail!(
-            "nonce mismatch for {}: account is at {}, transaction has {}",
-            tx.from,
-            sender.nonce,
-            tx.nonce
-        );
-    }
-    sender.debit(total)?;
-    sender.increase_nonce();
+    let mut evm = Context::mainnet()
+        .with_db(&mut *db)
+        .with_block(block)
+        .with_cfg(cfg)
+        .build_mainnet();
+    let outcome = evm
+        .transact(tx_env)
+        .map_err(|error| anyhow::anyhow!("REVM rejected transaction: {error:?}"))?;
+    let result = outcome.result;
+    let changes = outcome.state;
+    drop(evm);
 
-    accounts.entry(tx.to).or_default().credit(tx.value)?;
-    accounts.entry(miner).or_default().credit(fee)?;
-
-    Ok(TRANSFER_GAS)
+    // REVM finalizes valid reverts and halts with only fee/nonce changes left in
+    // its state. Commit that state too: invalid transactions instead return Err.
+    db.commit(changes);
+    Ok(result)
 }
+
+/// Builds the shared Shanghai configuration used for mined and simulated work.
+pub fn execution_cfg() -> CfgEnv<SpecId> {
+    CfgEnv::new_with_spec(SpecId::SHANGHAI).with_chain_id(CHAIN_ID)
+}
+
+/// Maps Breeja's transaction fields into the REVM transaction environment.
+pub fn pending_tx_env(tx: &PendingTransaction) -> TxEnv {
+    TxEnv {
+        tx_type: 0,
+        caller: tx.from,
+        gas_limit: tx.gas,
+        gas_price: tx.gas_price,
+        kind: tx.to,
+        value: tx.value,
+        data: tx.input.clone(),
+        nonce: tx.nonce,
+        chain_id: Some(tx.chain_id),
+        ..Default::default()
+    }
+}
+
+/// Runs an eth_call / estimate probe against an owned snapshot. REVM returns
+/// the state changes, but this function deliberately drops them with the DB.
+pub fn simulate_transaction(
+    mut db: BreejaDb,
+    cfg: CfgEnv<SpecId>,
+    tx_env: TxEnv,
+    block: BlockEnv,
+) -> Result<ExecutionResult, SimulationError> {
+    let mut evm = Context::mainnet()
+        .with_db(&mut db)
+        .with_block(block)
+        .with_cfg(cfg)
+        .build_mainnet();
+    let outcome = evm.transact(tx_env).map_err(|error| match error {
+        revm::context_interface::result::EVMError::Transaction(error) => {
+            SimulationError::Invalid(error.to_string())
+        }
+        revm::context_interface::result::EVMError::Header(error) => {
+            SimulationError::Invalid(error.to_string())
+        }
+        other => SimulationError::Internal(format!("REVM simulation error: {other:?}")),
+    })?;
+    // Do not call DatabaseCommit: both successful and failed simulations are
+    // read-only from Breeja's point of view.
+    Ok(outcome.result)
+}
+
+#[derive(Debug)]
+pub enum SimulationError {
+    Invalid(String),
+    Internal(String),
+}
+
+impl std::fmt::Display for SimulationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(message) => write!(f, "invalid EVM transaction: {message}"),
+            Self::Internal(message) => write!(f, "internal EVM error: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for SimulationError {}
 
 /// Pays the miner for sealing a block.
 ///
 /// This is the only way new ETH enters the supply, and it is what makes mining
 /// worth the electricity. Breeja pays Frontier's 5 ETH; Ethereum reduced this
 /// twice before dropping it entirely at the merge.
-pub fn pay_block_reward(
+fn pay_block_reward(
     accounts: &mut HashMap<Address, Account>,
     miner: Address,
 ) -> Result<(), anyhow::Error> {
@@ -69,28 +137,63 @@ pub fn pay_block_reward(
 }
 
 /// Executes a batch of pending transactions, producing the state and receipts the
-/// next block will commit to.
-///
-/// A transaction that fails here is *skipped*, not included. Real Ethereum
-/// includes failing transactions and charges for them, because an EVM can revert
-/// halfway through and the gas is still spent. Breeja validates everything before
-/// it reaches the mempool, so the only failures left are races — a nonce that
-/// another transaction already used — and those are better dropped than mined.
+/// next block will commit to. Transactions REVM rejects as invalid are skipped.
 pub fn execute_block(
-    mut accounts: HashMap<Address, Account>,
+    mut db: BreejaDb,
     batch: &[PendingTransaction],
+    parent: &Block,
     block_number: u64,
+    timestamp: u64,
+    difficulty: u8,
     miner: Address,
 ) -> Execution {
+    let block_env = BlockEnv {
+        number: U256::from(block_number),
+        beneficiary: miner,
+        timestamp: U256::from(timestamp),
+        gas_limit: BLOCK_GAS_LIMIT,
+        basefee: 0,
+        difficulty: U256::from(difficulty),
+        prevrandao: Some(parent.hash),
+        ..Default::default()
+    };
     let mut transactions = Vec::new();
     let mut receipts = Vec::new();
     let mut gas_used = 0u64;
 
     for tx in batch {
-        match apply_transfer(&mut accounts, tx, miner) {
-            Ok(tx_gas) => {
+        // Execute against a throwaway copy so a transaction that would exceed
+        // the remaining block gas cannot leak state changes into this candidate.
+        let mut candidate_db = db.clone();
+        match execute_transaction(&mut candidate_db, tx, block_env.clone()) {
+            Ok(result) => {
+                let tx_gas = result.tx_gas_used();
+                if gas_used.saturating_add(tx_gas) > BLOCK_GAS_LIMIT {
+                    continue;
+                }
+                db = candidate_db;
                 let index = transactions.len() as u64;
                 gas_used += tx_gas;
+                let success = result.is_success();
+                let logs = if success {
+                    result
+                        .logs()
+                        .iter()
+                        .map(|log| Log {
+                            address: log.address,
+                            topics: log.data.topics().to_vec(),
+                            data: log.data.data.clone(),
+                        })
+                        .collect()
+                } else {
+                    // REVM exposes logs produced before a revert in its result;
+                    // Ethereum receipts contain no logs for reverted execution.
+                    Vec::new()
+                };
+                let recipient = match tx.to {
+                    TxKind::Call(address) => Some(address),
+                    TxKind::Create => None,
+                };
 
                 transactions.push(Transaction {
                     hash: tx.hash,
@@ -101,12 +204,12 @@ pub fn execute_block(
                     transaction_index: index,
                     chain_id: tx.chain_id,
                     from: tx.from,
-                    to: tx.to,
+                    to: recipient,
                     value: tx.value,
                     nonce: tx.nonce,
                     gas: tx.gas,
                     gas_price: tx.gas_price,
-                    input: Default::default(),
+                    input: tx.input.clone(),
                     v: tx.v,
                     r: tx.r,
                     s: tx.s,
@@ -118,21 +221,24 @@ pub fn execute_block(
                     block_hash: B256::ZERO,
                     block_number,
                     from: tx.from,
-                    to: tx.to,
+                    to: recipient,
+                    contract_address: result.created_address(),
+                    logs,
                     gas_used: tx_gas,
                     cummulative_gas_used: gas_used,
                     effective_gas_price: tx.gas_price,
-                    status: 1,
+                    status: u8::from(success),
                 });
             }
             Err(error) => {
-                tracing::warn!(tx = %tx.hash, %error, "dropping transaction that no longer applies");
+                tracing::warn!(tx = %tx.hash, %error, "dropping transaction REVM rejected");
             }
         }
     }
 
+    let (mut accounts, code_by_hash) = db.into_parts();
     // The miner's reward is paid after the transactions, so a miner cannot spend
-    // it inside the very block that grants it.
+    // it inside the very block that grants it. REVM has already paid tx fees.
     if let Err(error) = pay_block_reward(&mut accounts, miner) {
         tracing::error!(%error, "failed to pay block reward");
     }
@@ -145,6 +251,7 @@ pub fn execute_block(
         receipts_root: hash_list_root(&receipt_hashes),
         state_root: primitives::node::state_root_of(&accounts),
         accounts,
+        code_by_hash,
         transactions,
         receipts,
         gas_used,
@@ -153,100 +260,162 @@ pub fn execute_block(
 
 #[cfg(test)]
 mod tests {
-    use primitives::constants::{DEV_ADDRESS, DEV_ADDRESS_1, GAS_PRICE};
+    use alloy::primitives::Address;
+    use primitives::constants::{
+        BLOCK_GAS_LIMIT, BLOCK_REWARD, DEV_ADDRESS, DEV_ADDRESS_1, GAS_PRICE, TRANSFER_GAS,
+    };
+    use revm::context::BlockEnv;
 
     use super::*;
 
     fn one_eth() -> U256 {
-        U256::from(10u64).pow(U256::from(18))
+        U256::from(10u64).pow(U256::from(18u64))
     }
 
-    fn funded(balance: U256) -> HashMap<Address, Account> {
-        let mut accounts = HashMap::new();
-        accounts.insert(DEV_ADDRESS, Account::new(balance));
-        accounts
+    fn funded(balance: U256) -> BreejaDb {
+        let mut db = BreejaDb::default();
+        db.accounts.insert(DEV_ADDRESS, Account::new(balance));
+        db
     }
 
     fn transfer(value: U256, nonce: u64) -> PendingTransaction {
         PendingTransaction {
             hash: B256::repeat_byte(0xab),
             from: DEV_ADDRESS,
-            to: DEV_ADDRESS_1,
+            to: TxKind::Call(DEV_ADDRESS_1),
+            input: Bytes::new(),
             value,
             nonce,
             gas: TRANSFER_GAS,
             gas_price: GAS_PRICE,
-            chain_id: 1,
+            chain_id: CHAIN_ID,
             v: 0,
             r: U256::ZERO,
             s: U256::ZERO,
         }
     }
 
-    #[test]
-    fn a_transfer_moves_value_charges_a_fee_and_bumps_the_nonce() {
-        let miner = Address::repeat_byte(0x99);
-        let mut accounts = funded(one_eth() * U256::from(10u64));
-        let fee = U256::from(TRANSFER_GAS) * U256::from(GAS_PRICE);
+    fn transfer_block_env(miner: Address) -> BlockEnv {
+        BlockEnv {
+            number: U256::from(1u64),
+            beneficiary: miner,
+            timestamp: U256::from(1u64),
+            gas_limit: BLOCK_GAS_LIMIT,
+            basefee: 0,
+            prevrandao: Some(B256::repeat_byte(0x77)),
+            ..Default::default()
+        }
+    }
 
-        let gas = apply_transfer(&mut accounts, &transfer(one_eth(), 0), miner).unwrap();
-        assert_eq!(gas, TRANSFER_GAS);
-
-        let sender = &accounts[&DEV_ADDRESS];
-        assert_eq!(
-            sender.balance,
-            one_eth() * U256::from(10u64) - one_eth() - fee
-        );
-        assert_eq!(sender.nonce, 1);
-        assert_eq!(accounts[&DEV_ADDRESS_1].balance, one_eth());
-        assert_eq!(accounts[&miner].balance, fee);
+    fn parent() -> Block {
+        Block {
+            hash: B256::repeat_byte(0x77),
+            ..Default::default()
+        }
     }
 
     #[test]
-    fn no_eth_is_created_or_destroyed_by_a_transfer() {
+    fn a_revm_transfer_preserves_plain_transfer_parity() {
         let miner = Address::repeat_byte(0x99);
         let start = one_eth() * U256::from(10u64);
-        let mut accounts = funded(start);
+        let fee = U256::from(TRANSFER_GAS) * U256::from(GAS_PRICE);
+        let mut db = funded(start);
 
-        apply_transfer(&mut accounts, &transfer(one_eth(), 0), miner).unwrap();
+        let result =
+            execute_transaction(&mut db, &transfer(one_eth(), 0), transfer_block_env(miner))
+                .unwrap();
 
-        let total: U256 = accounts
-            .values()
-            .map(|a| a.balance)
-            .fold(U256::ZERO, |a, b| a + b);
+        assert!(result.is_success());
+        assert_eq!(result.tx_gas_used(), TRANSFER_GAS);
+        assert_eq!(result.created_address(), None);
+        assert!(result.logs().is_empty());
+        assert_eq!(db.accounts[&DEV_ADDRESS].balance, start - one_eth() - fee);
+        assert_eq!(db.accounts[&DEV_ADDRESS].nonce, 1);
+        assert_eq!(db.accounts[&DEV_ADDRESS_1].balance, one_eth());
+        assert_eq!(db.accounts[&miner].balance, fee);
+
+        let total: U256 = db.accounts.values().map(|account| account.balance).sum();
+        assert_eq!(total, start);
+    }
+
+    #[test]
+    fn a_transfer_moves_value_charges_one_fee_and_bumps_the_nonce_once() {
+        let miner = Address::repeat_byte(0x99);
+        let start = one_eth() * U256::from(10u64);
+        let fee = U256::from(TRANSFER_GAS) * U256::from(GAS_PRICE);
+        let mut db = funded(start);
+
+        execute_transaction(&mut db, &transfer(one_eth(), 0), transfer_block_env(miner)).unwrap();
+
+        assert_eq!(db.accounts[&DEV_ADDRESS].balance, start - one_eth() - fee);
+        assert_eq!(db.accounts[&DEV_ADDRESS].nonce, 1);
+        assert_eq!(db.accounts[&DEV_ADDRESS_1].balance, one_eth());
+        assert_eq!(db.accounts[&miner].balance, fee);
+    }
+
+    #[test]
+    fn no_eth_is_created_or_destroyed_by_a_revm_transfer() {
+        let start = one_eth() * U256::from(10u64);
+        let mut db = funded(start);
+
+        execute_transaction(
+            &mut db,
+            &transfer(one_eth(), 0),
+            transfer_block_env(Address::repeat_byte(0x99)),
+        )
+        .unwrap();
+
+        let total: U256 = db.accounts.values().map(|account| account.balance).sum();
         assert_eq!(total, start);
     }
 
     #[test]
     fn a_transfer_the_sender_cannot_afford_is_rejected() {
-        let miner = Address::repeat_byte(0x99);
-        // Enough for the value but not the fee on top.
-        let mut accounts = funded(one_eth());
-        assert!(apply_transfer(&mut accounts, &transfer(one_eth(), 0), miner).is_err());
+        let mut db = funded(one_eth());
+        assert!(
+            execute_transaction(
+                &mut db,
+                &transfer(one_eth(), 0),
+                transfer_block_env(Address::repeat_byte(0x99)),
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn a_transfer_with_the_wrong_nonce_is_rejected() {
-        let miner = Address::repeat_byte(0x99);
-        let mut accounts = funded(one_eth() * U256::from(10u64));
-        assert!(apply_transfer(&mut accounts, &transfer(one_eth(), 7), miner).is_err());
+        let mut db = funded(one_eth() * U256::from(10u64));
+        assert!(
+            execute_transaction(
+                &mut db,
+                &transfer(one_eth(), 7),
+                transfer_block_env(Address::repeat_byte(0x99)),
+            )
+            .is_err()
+        );
     }
 
     #[test]
-    fn executing_a_block_pays_the_reward_and_records_receipts() {
+    fn executing_a_block_pays_the_reward_and_records_successful_receipts() {
         let miner = Address::repeat_byte(0x99);
-        let accounts = funded(one_eth() * U256::from(10u64));
-        let batch = vec![transfer(one_eth(), 0)];
-
-        let execution = execute_block(accounts, &batch, 1, miner);
+        let start = one_eth() * U256::from(10u64);
+        let fee = U256::from(TRANSFER_GAS) * U256::from(GAS_PRICE);
+        let execution = execute_block(
+            funded(start),
+            &[transfer(one_eth(), 0)],
+            &parent(),
+            1,
+            2,
+            4,
+            miner,
+        );
 
         assert_eq!(execution.transactions.len(), 1);
         assert_eq!(execution.receipts.len(), 1);
         assert_eq!(execution.receipts[0].status, 1);
-        assert_eq!(execution.gas_used, TRANSFER_GAS);
+        assert_eq!(execution.receipts[0].gas_used, TRANSFER_GAS);
         assert_eq!(execution.receipts[0].cummulative_gas_used, TRANSFER_GAS);
-
-        let fee = U256::from(TRANSFER_GAS) * U256::from(GAS_PRICE);
+        assert_eq!(execution.gas_used, TRANSFER_GAS);
         assert_eq!(execution.accounts[&miner].balance, BLOCK_REWARD + fee);
 
         // Non-empty roots, because this block committed to a transaction.
@@ -257,7 +426,7 @@ mod tests {
     #[test]
     fn an_empty_block_still_pays_the_miner_but_commits_to_no_transactions() {
         let miner = Address::repeat_byte(0x99);
-        let execution = execute_block(funded(one_eth()), &[], 1, miner);
+        let execution = execute_block(funded(one_eth()), &[], &parent(), 1, 2, 4, miner);
 
         assert!(execution.transactions.is_empty());
         assert_eq!(execution.gas_used, 0);
@@ -267,12 +436,79 @@ mod tests {
 
     #[test]
     fn a_transaction_that_no_longer_applies_is_skipped_not_mined() {
-        let miner = Address::repeat_byte(0x99);
-        let accounts = funded(one_eth() * U256::from(10u64));
+        let start = one_eth() * U256::from(10u64);
         // Two transactions claiming the same nonce: only the first can apply.
         let batch = vec![transfer(one_eth(), 0), transfer(one_eth(), 0)];
 
-        let execution = execute_block(accounts, &batch, 1, miner);
+        let execution = execute_block(
+            funded(start),
+            &batch,
+            &parent(),
+            1,
+            2,
+            4,
+            Address::repeat_byte(0x99),
+        );
         assert_eq!(execution.transactions.len(), 1);
+    }
+
+    #[test]
+    fn a_batch_with_varying_gas_never_exceeds_the_block_gas_limit() {
+        let miner = Address::repeat_byte(0x99);
+        let contract = Address::repeat_byte(0x88);
+        let sender_balance = U256::from(BLOCK_GAS_LIMIT) * U256::from(2u64);
+        let loop_code = revm::state::Bytecode::new_raw(Bytes::from_static(&[
+            0x5b, // JUMPDEST
+            0x60, 0x00, // PUSH1 0
+            0x56, // JUMP
+        ]));
+        let code_hash = loop_code.hash_slow();
+        let mut db = funded(sender_balance);
+        db.accounts
+            .insert(DEV_ADDRESS_1, Account::new(sender_balance));
+        db.accounts.insert(
+            contract,
+            Account {
+                code_hash,
+                ..Default::default()
+            },
+        );
+        db.code_by_hash.insert(code_hash, loop_code);
+
+        let first_gas = BLOCK_GAS_LIMIT / 2 + 100_000;
+        let second_gas = BLOCK_GAS_LIMIT / 2;
+        let make_call = |from, gas, hash_byte| PendingTransaction {
+            hash: B256::repeat_byte(hash_byte),
+            from,
+            to: TxKind::Call(contract),
+            input: Bytes::new(),
+            value: U256::ZERO,
+            nonce: 0,
+            gas,
+            gas_price: 1,
+            chain_id: CHAIN_ID,
+            v: 0,
+            r: U256::ZERO,
+            s: U256::ZERO,
+        };
+        let execution = execute_block(
+            db,
+            &[
+                make_call(DEV_ADDRESS, first_gas, 0xaa),
+                make_call(DEV_ADDRESS_1, second_gas, 0xbb),
+            ],
+            &parent(),
+            1,
+            2,
+            4,
+            miner,
+        );
+
+        assert_eq!(execution.transactions.len(), 1);
+        assert_eq!(execution.receipts[0].status, 0);
+        assert_eq!(execution.gas_used, first_gas);
+        assert!(execution.gas_used <= BLOCK_GAS_LIMIT);
+        assert_eq!(execution.accounts[&DEV_ADDRESS].nonce, 1);
+        assert_eq!(execution.accounts[&DEV_ADDRESS_1].nonce, 0);
     }
 }
