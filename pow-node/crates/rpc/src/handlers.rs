@@ -3,12 +3,17 @@ use jsonrpsee::{
     core::RpcResult,
     types::{ErrorObjectOwned, Params, error::ErrorCode},
 };
+use node::{
+    evm::BreejaDb,
+    executor::{BlockContext, TxOutcome, estimate_gas, simulate},
+};
 use primitives::{
-    constants::{CHAIN_ID, GAS_PRICE, TRANSFER_GAS},
+    constants::CHAIN_ID,
     node::BlockState,
-    params::{BlockTag, CallRequest},
+    params::{BlockTag, CallRequest, LogFilter},
     response::{
-        BlockResponse, TransactionReceiptResponse, TransactionResponse, data_hash, quantity,
+        BlockResponse, LogResponse, TransactionReceiptResponse, TransactionResponse, data_bytes,
+        data_hash, data_word, quantity,
     },
 };
 use serde_json::Value;
@@ -24,14 +29,7 @@ fn invalid_input(error: impl std::fmt::Display) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(INVALID_INPUT, error.to_string(), None::<()>)
 }
 
-/// Error returned when a request needs the EVM this node does not have.
-fn no_evm(detail: &str) -> ErrorObjectOwned {
-    ErrorObjectOwned::owned(
-        INVALID_INPUT,
-        format!("this node has no EVM and only processes ETH transfers: {detail}"),
-        None::<()>,
-    )
-}
+const EXECUTION_REVERTED: i32 = 3;
 
 fn invalid_params(error: impl std::fmt::Display) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(
@@ -230,66 +228,137 @@ pub fn send_raw_transaction_handler(params: Params<'_>, context: &RPCContext) ->
 }
 
 
-/// Executes a read-only call.
-///
-/// On Ethereum this runs the EVM against current state and discards the result.
-/// Breeja has no EVM, so there are only two possible answers: a call with no
-/// calldata invokes no code and returns no data (`0x`), and a call *with* calldata
-/// is refused, because answering it honestly would require the interpreter this
-/// node omits.
+fn simulation_snapshot(
+    context: &RPCContext,
+    tag: Option<BlockTag>,
+) -> Result<(BreejaDb, BlockContext), ErrorObjectOwned> {
+    let state = context.chain.read();
+    let number = resolve_tag(&state, &tag.unwrap_or(BlockTag::Latest))?;
+    let parent = state
+        .get_block(number)
+        .ok_or_else(|| invalid_input(format!("block {number} does not exist")))?;
+    let block = BlockContext::on_top_of(parent, parent.difficulty, context.chain.config().miner);
+    let db = BreejaDb::snapshot_at(&state, number)
+        .ok_or_else(|| invalid_input(format!("no state recorded for block {number}")))?;
+    Ok((db, block))
+}
+
+fn execution_failed(outcome: &TxOutcome) -> ErrorObjectOwned {
+    match outcome.halt_reason {
+        Some(_) => invalid_input(outcome.failure()),
+        None => ErrorObjectOwned::owned(
+            EXECUTION_REVERTED,
+            "execution reverted",
+            Some(data_bytes(&outcome.output)),
+        ),
+    }
+}
+
 pub fn call_handler(params: Params<'_>, context: &RPCContext) -> RpcResult<String> {
     let mut sequence = params.sequence();
     let request: CallRequest = sequence.next()?;
     let tag = sequence.optional_next::<BlockTag>()?;
 
-    // Validate the block tag even though the answer does not depend on state, so
-    // a caller asking about a nonexistent block gets told.
-    if let Some(tag) = tag {
-        resolve_tag(&context.chain.read(), &tag)?;
-    }
+    let (mut db, block) = simulation_snapshot(context, tag)?;
+    let gas_limit = request
+        .gas
+        .map(|gas| gas.saturating_to::<u64>().min(block.gas_limit))
+        .unwrap_or(block.gas_limit);
 
-    if request.needs_evm() {
-        return Err(no_evm(
-            "eth_call can only be answered for plain transfers, which return no data",
-        ));
+    let outcome = simulate(&mut db, &block, &request, gas_limit).map_err(invalid_input)?;
+    if !outcome.success {
+        return Err(execution_failed(&outcome));
     }
-
-    Ok("0x".to_owned())
+    Ok(data_bytes(&outcome.output))
 }
 
-/// Estimates the gas a transaction would need.
-///
-/// Without an EVM there is exactly one kind of transaction to estimate, and its
-/// cost is a constant: 21,000 gas, the intrinsic cost of a transfer. Anything
-/// carrying calldata would need to be executed to be estimated, so it is refused.
 pub fn estimate_gas_handler(params: Params<'_>, context: &RPCContext) -> RpcResult<String> {
     let mut sequence = params.sequence();
     let request: CallRequest = sequence.next()?;
     let tag = sequence.optional_next::<BlockTag>()?;
 
-    if let Some(tag) = tag {
-        resolve_tag(&context.chain.read(), &tag)?;
-    }
+    let (mut db, block) = simulation_snapshot(context, tag)?;
+    let gas = estimate_gas(&mut db, &block, &request).map_err(invalid_input)?;
+    Ok(quantity(gas))
+}
 
-    if request.needs_evm() {
-        return Err(no_evm(
-            "eth_estimateGas can only be answered for plain transfers, which always cost 21000 gas",
-        ));
-    }
+pub fn gas_price_handler(context: &RPCContext) -> String {
+    quantity(context.chain.read().gas_price())
+}
 
-    // A transfer the sender cannot afford would never be mined, so estimating it
-    // is a client bug worth surfacing.
-    if let Some(from) = request.from {
-        let value = request.value.unwrap_or(U256::ZERO);
-        let fee = U256::from(TRANSFER_GAS) * U256::from(GAS_PRICE);
-        let available = context.chain.read().get_pending_balance(&from);
-        if available < value + fee {
-            return Err(invalid_input(format!(
-                "insufficient funds: {from} has {available} but the transfer needs {}",
-                value + fee
-            )));
+pub fn get_code_handler(params: Params<'_>, context: &RPCContext) -> RpcResult<String> {
+    let mut sequence = params.sequence();
+    let address: Address = sequence.next()?;
+    let tag = sequence.optional_next::<BlockTag>()?;
+
+    let state = context.chain.read();
+    let number = resolve_tag(&state, &tag.unwrap_or(BlockTag::Latest))?;
+    let code = state
+        .get_code_at(&address, number)
+        .ok_or_else(|| invalid_input(format!("no state recorded for block {number}")))?;
+    Ok(data_bytes(&code))
+}
+
+pub fn get_storage_at_handler(params: Params<'_>, context: &RPCContext) -> RpcResult<String> {
+    let mut sequence = params.sequence();
+    let address: Address = sequence.next()?;
+    let slot: U256 = sequence.next()?;
+    let tag = sequence.optional_next::<BlockTag>()?;
+
+    let state = context.chain.read();
+    let number = resolve_tag(&state, &tag.unwrap_or(BlockTag::Latest))?;
+    let value = state
+        .get_storage_at_block(&address, slot, number)
+        .ok_or_else(|| invalid_input(format!("no state recorded for block {number}")))?;
+    Ok(data_word(value))
+}
+
+pub fn get_logs_handler(params: Params<'_>, context: &RPCContext) -> RpcResult<Value> {
+    let filter: LogFilter = params.one()?;
+
+    let state = context.chain.read();
+    let (from, to) = match filter.block_hash {
+        Some(hash) => {
+            if filter.from_block.is_some() || filter.to_block.is_some() {
+                return Err(invalid_params(
+                    "blockHash cannot be combined with fromBlock or toBlock",
+                ));
+            }
+            let number = state
+                .get_block_by_hash(&hash)
+                .map(|block| block.number)
+                .ok_or_else(|| invalid_input(format!("unknown block {hash}")))?;
+            (number, number)
+        }
+        None => {
+            let from = resolve_tag(&state, &filter.from_block.unwrap_or(BlockTag::Latest))?;
+            let to = resolve_tag(&state, &filter.to_block.unwrap_or(BlockTag::Latest))?;
+            if from > to {
+                return Err(invalid_input(format!(
+                    "fromBlock {from} is after toBlock {to}"
+                )));
+            }
+            (from, to)
+        }
+    };
+
+    let mut logs = Vec::new();
+    for number in from..=to {
+        let Some(block) = state.get_block(number) else {
+            continue;
+        };
+        for hash in &block.transactions {
+            let Some(receipt) = state.get_receipt(hash) else {
+                continue;
+            };
+            logs.extend(
+                receipt
+                    .logs
+                    .iter()
+                    .filter(|log| filter.matches(&log.address, &log.topics))
+                    .map(|log| LogResponse::new(receipt, log)),
+            );
         }
     }
-
-    Ok(quantity(TRANSFER_GAS))
+    Ok(serde_json::to_value(logs).expect("log responses always serialize"))
 }

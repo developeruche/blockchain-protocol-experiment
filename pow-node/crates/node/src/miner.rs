@@ -11,10 +11,7 @@
 //! request. So the miner snapshots the state, releases the lock, does its hashing,
 //! and only re-acquires the lock for the instant it takes to commit.
 
-use std::{
-    thread::{self, JoinHandle},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::thread::{self, JoinHandle};
 
 use alloy::primitives::Bytes;
 use primitives::{
@@ -22,7 +19,12 @@ use primitives::{
     node::{Block, BlockHeader, retarget_difficulty},
 };
 
-use crate::{chain::Chain, executor::execute_block, pow};
+use crate::{
+    chain::Chain,
+    evm::BreejaDb,
+    executor::{BlockContext, execute_block},
+    pow,
+};
 
 /// Starts the miner on its own OS thread.
 ///
@@ -51,19 +53,20 @@ fn run(chain: Chain) {
     while !chain.is_shutting_down() {
         // snapshot the chain, holding the read lock only briefly
         let generation = chain.mempool_generation();
-        let (accounts, parent, batch) = {
+        let (db, parent, batch) = {
             let state = chain.read();
             (
-                state.accounts_snapshot(),
+                BreejaDb::snapshot(&state),
                 state.head().clone(),
                 state.peek_mempool_batch(),
             )
         };
 
-        let number = parent.number + 1;
+        let context = BlockContext::on_top_of(&parent, difficulty, config.miner);
+        let number = context.number;
 
         // execute the candidate block, with no lock held
-        let execution = execute_block(accounts, &batch, number, config.miner);
+        let execution = execute_block(db, &batch, &context);
 
         let mut header = BlockHeader {
             number,
@@ -71,9 +74,9 @@ fn run(chain: Chain) {
             state_root: execution.state_root,
             transaction_root: execution.transaction_root,
             receipts_root: execution.receipts_root,
+            logs_bloom: execution.logs_bloom,
             difficulty,
-            // A block's timestamp must advance, even if the system clock does not.
-            timestamp: unix_now().max(parent.timestamp + 1),
+            timestamp: context.timestamp,
             gas_limit: BLOCK_GAS_LIMIT,
             gas_used: execution.gas_used,
             miner: config.miner,
@@ -106,6 +109,7 @@ fn run(chain: Chain) {
             state_root: header.state_root,
             transaction_root: header.transaction_root,
             receipts_root: header.receipts_root,
+            logs_bloom: header.logs_bloom,
             difficulty,
             total_difficulty: parent.total_difficulty + difficulty as u64,
             timestamp: header.timestamp,
@@ -139,7 +143,13 @@ fn run(chain: Chain) {
                 continue;
             }
             block.transactions = transactions.iter().map(|tx| tx.hash).collect();
-            state.commit_block(execution.accounts, block, transactions, receipts);
+            state.commit_block(
+                execution.accounts,
+                execution.code,
+                block,
+                transactions,
+                receipts,
+            );
         }
 
         tracing::info!(
@@ -164,12 +174,4 @@ fn run(chain: Chain) {
     }
 
     tracing::info!("miner stopped");
-}
-
-/// Current wall-clock time as a Unix timestamp in seconds.
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
