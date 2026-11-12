@@ -3,16 +3,20 @@ use alloy::consensus::{Transaction as TxTrait, TxEnvelope, TxType};
 use alloy::eips::Decodable2718;
 use alloy::primitives::{Address, B256, Bytes, TxKind, U256};
 use primitives::{
-    constants::{CHAIN_ID, GAS_PRICE, TRANSFER_GAS},
-    node::{BlockState, PendingTransaction},
+    constants::{BLOCK_GAS_LIMIT, CHAIN_ID, GAS_PRICE},
+    node::{BlockState, PendingTransaction, intrinsic_gas},
 };
+
+/// Largest init code a creation may carry (EIP-3860: twice the 24,576 byte code limit).
+const MAX_INITCODE_SIZE: usize = 49_152;
 
 /// A signed transaction that has been decoded and checked against the protocol
 /// rules, but not yet against chain state.
 struct DecodedTransaction {
     hash: B256,
     from: Address,
-    to: Address,
+    to: Option<Address>,
+    input: Bytes,
     value: U256,
     nonce: u64,
     gas: u64,
@@ -59,27 +63,34 @@ fn decode_and_check(raw: &Bytes) -> Result<DecodedTransaction, anyhow::Error> {
         None => CHAIN_ID,
     };
 
-    // No EVM means no contract creation.
+    // A creation has no recipient; its input is the init code.
     let to = match envelope.kind() {
-        TxKind::Call(to) => to,
-        TxKind::Create => anyhow::bail!(
-            "contract creation is not supported: this node has no EVM and only \
-             processes ETH transfers"
-        ),
+        TxKind::Call(to) => Some(to),
+        TxKind::Create => None,
     };
+    let input = envelope.input().clone();
 
-    // ...and no contract calls either. Calldata would need an interpreter.
-    if !envelope.input().is_empty() {
+    // Init code is capped (EIP-3860, in force under Shanghai).
+    if to.is_none() && input.len() > MAX_INITCODE_SIZE {
         anyhow::bail!(
-            "transaction carries {} bytes of calldata: this node has no EVM and \
-             only processes plain ETH transfers",
-            envelope.input().len()
+            "init code is {} bytes, above the {MAX_INITCODE_SIZE} byte limit",
+            input.len()
         );
     }
 
+    // The gas limit must at least cover the intrinsic cost: 21,000 for a transfer,
+    // more for calldata and for a creation. The EVM would refuse it anyway, but
+    // refusing it here keeps it out of the mempool.
     let gas = envelope.gas_limit();
-    if gas < TRANSFER_GAS {
-        anyhow::bail!("gas limit {gas} is below the intrinsic cost of a transfer ({TRANSFER_GAS})");
+    let intrinsic = intrinsic_gas(&input, to.is_none());
+    if gas < intrinsic {
+        anyhow::bail!("gas limit {gas} is below the intrinsic cost of this transaction ({intrinsic})");
+    }
+
+    // A transaction whose limit exceeds a whole block could never be included, and
+    // since blocks take transactions in order it would block everything behind it.
+    if gas > BLOCK_GAS_LIMIT {
+        anyhow::bail!("gas limit {gas} is above the block gas limit ({BLOCK_GAS_LIMIT})");
     }
 
     let gas_price = envelope.max_fee_per_gas();
@@ -92,6 +103,7 @@ fn decode_and_check(raw: &Bytes) -> Result<DecodedTransaction, anyhow::Error> {
         hash: *envelope.tx_hash(),
         from,
         to,
+        input,
         value: envelope.value(),
         nonce: envelope.nonce(),
         gas,
@@ -161,6 +173,7 @@ pub fn admit(state: &mut BlockState, raw: &Bytes) -> Result<B256, anyhow::Error>
         hash: tx.hash,
         from: tx.from,
         to: tx.to,
+        input: tx.input,
         value: tx.value,
         nonce: tx.nonce,
         gas: tx.gas,
@@ -192,5 +205,38 @@ mod tests {
     fn garbage_bytes_are_rejected_not_panicked_on() {
         assert!(decode_and_check(&Bytes::new()).is_err());
         assert!(decode_and_check(&Bytes::from_static(&[0xff, 0x00, 0x13])).is_err());
+    }
+
+    #[test]
+    fn a_creation_and_calldata_are_now_admissible() {
+        use crate::testing::{DEV_PRIVATE_KEY, sign_call, sign_create};
+        let create = sign_create(DEV_PRIVATE_KEY, vec![0x00].into(), 0, 100_000).unwrap();
+        let decoded = decode_and_check(&create).unwrap();
+        assert_eq!(decoded.to, None);
+
+        let call = sign_call(DEV_PRIVATE_KEY, Address::ZERO, vec![1, 2, 3].into(), 0, 50_000).unwrap();
+        assert_eq!(decode_and_check(&call).unwrap().input.len(), 3);
+    }
+
+    #[test]
+    fn a_gas_limit_below_the_intrinsic_cost_is_rejected() {
+        use crate::testing::{DEV_PRIVATE_KEY, sign_call, sign_create};
+        // 21,000 covers a bare transfer but not 32 non-zero bytes of calldata.
+        let call = sign_call(DEV_PRIVATE_KEY, Address::ZERO, vec![1; 32].into(), 0, 21_000).unwrap();
+        assert!(decode_and_check(&call).is_err());
+        // Nor does it cover a creation's extra 32,000.
+        let create = sign_create(DEV_PRIVATE_KEY, vec![0].into(), 0, 40_000).unwrap();
+        assert!(decode_and_check(&create).is_err());
+    }
+
+    #[test]
+    fn a_gas_limit_above_the_block_gas_limit_is_rejected() {
+        use crate::testing::{DEV_PRIVATE_KEY, sign_call};
+        // It could never be included, and would block every transaction behind it.
+        let huge = sign_call(DEV_PRIVATE_KEY, Address::ZERO, Default::default(), 0, BLOCK_GAS_LIMIT + 1).unwrap();
+        let error = decode_and_check(&huge).err().expect("must be rejected");
+        assert!(error.to_string().contains("block gas limit"), "got: {error}");
+        let at_limit = sign_call(DEV_PRIVATE_KEY, Address::ZERO, Default::default(), 0, BLOCK_GAS_LIMIT).unwrap();
+        assert!(decode_and_check(&at_limit).is_ok());
     }
 }

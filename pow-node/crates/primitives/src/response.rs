@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     constants::{EXTRA_DATA, TRANSFER_GAS},
-    node::{Block, Transaction, TransactionReceipt},
+    node::{Block, ReceiptLog, Transaction, TransactionReceipt},
 };
 
 /// Encodes a number as an Ethereum *quantity*: minimal hex, `0x0` for zero.
@@ -48,6 +48,13 @@ pub struct BlockResponse {
     #[serde(rename = "transactionsRoot")]
     pub transaction_root: String,
     pub receipts_root: String,
+    pub logs_bloom: String,
+    /// Hash of the uncle list. Breeja never includes uncles, so this is always
+    /// the keccak of an empty RLP list. Standard clients require the field.
+    pub sha3_uncles: String,
+    /// Proof-of-work mix digest. Breeja's proof of work has no mix digest, so it
+    /// is zero; standard clients require the field.
+    pub mix_hash: String,
     pub difficulty: String,
     pub total_difficulty: String,
     pub timestamp: String,
@@ -60,7 +67,14 @@ pub struct BlockResponse {
     /// Transaction hashes, or full transaction objects when the caller asked for
     /// them with the `fullTransactions` flag.
     pub transactions: Vec<serde_json::Value>,
+    /// Always empty: Breeja has no uncles.
+    pub uncles: Vec<String>,
 }
+
+/// keccak256 of the RLP encoding of an empty list, the `sha3Uncles` of any block
+/// without uncles.
+pub const EMPTY_UNCLES_HASH: &str =
+    "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347";
 
 /// A transaction, as `eth_getTransactionByHash` returns it.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -72,7 +86,8 @@ pub struct TransactionResponse {
     pub transaction_index: String,
     pub chain_id: String,
     pub from: String,
-    pub to: String,
+    /// `null` for a contract creation.
+    pub to: Option<String>,
     pub value: String,
     pub nonce: String,
     pub gas: String,
@@ -95,19 +110,38 @@ pub struct TransactionReceiptResponse {
     pub block_hash: String,
     pub block_number: String,
     pub from: String,
-    pub to: String,
+    /// `null` for a contract creation.
+    pub to: Option<String>,
     pub gas_used: String,
+    /// Serialized under the standard spelling. The original response used
+    /// `cummulativeGasUsed`, which standard clients (cast, alloy, ethers) reject.
+    #[serde(rename = "cumulativeGasUsed")]
     pub cummulative_gas_used: String,
     pub effective_gas_price: String,
-    /// Always `null`: deploying a contract needs an EVM, so Breeja rejects it.
+    /// Set when the transaction deployed a contract.
     pub contract_address: Option<String>,
-    /// Always empty: logs are emitted by the `LOG*` opcodes, and there is no EVM
-    /// to execute them.
+    /// Events emitted by the `LOG*` opcodes.
     pub logs: Vec<serde_json::Value>,
     pub logs_bloom: String,
     pub status: String,
     #[serde(rename = "type")]
     pub tx_type: String,
+}
+
+/// A log as `eth_getLogs` and `eth_getTransactionReceipt` return it: the event
+/// itself plus where it happened.
+pub fn log_json(receipt: &TransactionReceipt, log: &ReceiptLog) -> serde_json::Value {
+    serde_json::json!({
+        "address": data_address(&log.address),
+        "topics": log.topics.iter().map(data_hash).collect::<Vec<_>>(),
+        "data": data_bytes(&log.data),
+        "blockHash": data_hash(&receipt.block_hash),
+        "blockNumber": quantity(receipt.block_number),
+        "transactionHash": data_hash(&receipt.transaction_hash),
+        "transactionIndex": quantity(receipt.transaction_index),
+        "logIndex": quantity(log.log_index),
+        "removed": false,
+    })
 }
 
 impl BlockResponse {
@@ -123,6 +157,9 @@ impl BlockResponse {
             state_root: data_hash(&block.state_root),
             transaction_root: data_hash(&block.transaction_root),
             receipts_root: data_hash(&block.receipts_root),
+            logs_bloom: format!("{:#x}", block.logs_bloom),
+            sha3_uncles: EMPTY_UNCLES_HASH.to_owned(),
+            mix_hash: data_hash(&B256::ZERO),
             difficulty: quantity(block.difficulty),
             total_difficulty: quantity(block.total_difficulty),
             timestamp: quantity(block.timestamp),
@@ -133,6 +170,7 @@ impl BlockResponse {
             nonce: data_u64(block.nonce),
             size: quantity(block_size(block)),
             transactions,
+            uncles: Vec::new(),
         }
     }
 }
@@ -146,7 +184,7 @@ impl From<&Transaction> for TransactionResponse {
             transaction_index: quantity(tx.transaction_index),
             chain_id: quantity(tx.chain_id),
             from: data_address(&tx.from),
-            to: data_address(&tx.to),
+            to: tx.to.as_ref().map(data_address),
             value: quantity(tx.value),
             nonce: quantity(tx.nonce),
             gas: quantity(tx.gas),
@@ -168,14 +206,13 @@ impl From<&TransactionReceipt> for TransactionReceiptResponse {
             block_hash: data_hash(&receipt.block_hash),
             block_number: quantity(receipt.block_number),
             from: data_address(&receipt.from),
-            to: data_address(&receipt.to),
+            to: receipt.to.as_ref().map(data_address),
             gas_used: quantity(receipt.gas_used),
             cummulative_gas_used: quantity(receipt.cummulative_gas_used),
             effective_gas_price: quantity(receipt.effective_gas_price),
-            contract_address: None,
-            logs: Vec::new(),
-            // A bloom filter over no logs is 256 zero bytes.
-            logs_bloom: format!("0x{}", "00".repeat(256)),
+            contract_address: receipt.contract_address.as_ref().map(data_address),
+            logs: receipt.logs.iter().map(|log| log_json(receipt, log)).collect(),
+            logs_bloom: format!("{:#x}", receipt.logs_bloom),
             status: quantity(receipt.status),
             tx_type: "0x0".to_owned(),
         }

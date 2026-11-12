@@ -1,4 +1,4 @@
-use alloy::primitives::{Address, Bytes, U256};
+use alloy::primitives::{Address, B256, Bytes, U256};
 use serde::{Deserialize, Serialize};
 
 /// Which block a state query refers to.
@@ -80,20 +80,44 @@ pub struct CallRequest {
 
 impl CallRequest {
     /// The calldata this request carries, under whichever name it was sent.
-    ///
-    /// Breeja uses this to decide whether it can answer at all: calldata means
-    /// contract code, and there is no EVM to run it.
     pub fn calldata(&self) -> Bytes {
         self.data
             .clone()
             .or_else(|| self.input.clone())
             .unwrap_or_default()
     }
+}
 
-    /// Whether this request needs an EVM to answer.
-    pub fn needs_evm(&self) -> bool {
-        !self.calldata().is_empty() || self.to.is_none()
+/// A JSON-RPC parameter that may be a single value or a list of them, such as the
+/// `address` of a log filter.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum OneOrMany<T> {
+    One(T),
+    Many(Vec<T>),
+}
+
+impl<T> OneOrMany<T> {
+    pub fn into_vec(self) -> Vec<T> {
+        match self {
+            Self::One(one) => vec![one],
+            Self::Many(many) => many,
+        }
     }
+}
+
+/// The filter object `eth_getLogs` takes. Every field is optional.
+///
+/// `topics` is positional: `[A, null, [B, C]]` means "first topic is A, second is
+/// anything, third is B or C". `blockHash`, when present, replaces the block range.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogFilterRequest {
+    pub from_block: Option<BlockTag>,
+    pub to_block: Option<BlockTag>,
+    pub address: Option<OneOrMany<Address>>,
+    pub topics: Option<Vec<Option<OneOrMany<B256>>>>,
+    pub block_hash: Option<B256>,
 }
 
 #[cfg(test)]
@@ -123,22 +147,40 @@ mod tests {
     }
 
     #[test]
-    fn a_call_needs_an_evm_when_it_carries_calldata_or_creates_a_contract() {
-        let transfer = CallRequest {
-            to: Some(Address::ZERO),
+    fn calldata_is_read_from_either_field_name() {
+        let by_data = CallRequest {
+            data: Some(Bytes::from_static(&[1])),
             ..Default::default()
         };
-        assert!(!transfer.needs_evm());
-
-        let contract_call = CallRequest {
-            to: Some(Address::ZERO),
-            data: Some(Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef])),
+        let by_input = CallRequest {
+            input: Some(Bytes::from_static(&[2])),
             ..Default::default()
         };
-        assert!(contract_call.needs_evm());
+        assert_eq!(by_data.calldata().as_ref(), [1]);
+        assert_eq!(by_input.calldata().as_ref(), [2]);
+        assert!(CallRequest::default().calldata().is_empty());
+    }
 
-        // No `to` at all is a contract deployment.
-        let deployment = CallRequest::default();
-        assert!(deployment.needs_evm());
+    #[test]
+    fn a_log_filter_accepts_single_values_lists_and_null_wildcards() {
+        let filter: LogFilterRequest = serde_json::from_value(serde_json::json!({
+            "fromBlock": "0x1",
+            "toBlock": "latest",
+            "address": ["0x2222222222222222222222222222222222222222"],
+            "topics": [
+                "0x0000000000000000000000000000000000000000000000000000000000000001",
+                null,
+                ["0x0000000000000000000000000000000000000000000000000000000000000002"]
+            ]
+        }))
+        .unwrap();
+        assert_eq!(filter.from_block, Some(BlockTag::Number(1)));
+        assert_eq!(filter.address.unwrap().into_vec().len(), 1);
+        let topics = filter.topics.unwrap();
+        assert!(topics[0].is_some() && topics[1].is_none() && topics[2].is_some());
+
+        // Everything is optional.
+        let empty: LogFilterRequest = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(empty.address.is_none() && empty.topics.is_none());
     }
 }

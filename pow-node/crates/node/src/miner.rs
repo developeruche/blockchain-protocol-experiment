@@ -22,7 +22,12 @@ use primitives::{
     node::{Block, BlockHeader, retarget_difficulty},
 };
 
-use crate::{chain::Chain, executor::execute_block, pow};
+use crate::{
+    chain::Chain,
+    evm::BreejaDb,
+    executor::{BlockContext, execute_block},
+    pow,
+};
 
 /// Starts the miner on its own OS thread.
 ///
@@ -51,10 +56,10 @@ fn run(chain: Chain) {
     while !chain.is_shutting_down() {
         // snapshot the chain, holding the read lock only briefly
         let generation = chain.mempool_generation();
-        let (accounts, parent, batch) = {
+        let (db, parent, batch) = {
             let state = chain.read();
             (
-                state.accounts_snapshot(),
+                BreejaDb::from_state(&state),
                 state.head().clone(),
                 state.peek_mempool_batch(),
             )
@@ -63,7 +68,18 @@ fn run(chain: Chain) {
         let number = parent.number + 1;
 
         // execute the candidate block, with no lock held
-        let execution = execute_block(accounts, &batch, number, config.miner);
+        // A block's timestamp must advance, even if the system clock does not. It is
+        // fixed before execution because the EVM can read it (TIMESTAMP opcode).
+        let timestamp = unix_now().max(parent.timestamp + 1);
+        let context = BlockContext {
+            number,
+            timestamp,
+            parent_hash: parent.hash,
+            gas_limit: BLOCK_GAS_LIMIT,
+            difficulty,
+            miner: config.miner,
+        };
+        let execution = execute_block(db, &batch, &context);
 
         let mut header = BlockHeader {
             number,
@@ -71,9 +87,9 @@ fn run(chain: Chain) {
             state_root: execution.state_root,
             transaction_root: execution.transaction_root,
             receipts_root: execution.receipts_root,
+            logs_bloom: execution.logs_bloom,
             difficulty,
-            // A block's timestamp must advance, even if the system clock does not.
-            timestamp: unix_now().max(parent.timestamp + 1),
+            timestamp,
             gas_limit: BLOCK_GAS_LIMIT,
             gas_used: execution.gas_used,
             miner: config.miner,
@@ -106,6 +122,7 @@ fn run(chain: Chain) {
             state_root: header.state_root,
             transaction_root: header.transaction_root,
             receipts_root: header.receipts_root,
+            logs_bloom: header.logs_bloom,
             difficulty,
             total_difficulty: parent.total_difficulty + difficulty as u64,
             timestamp: header.timestamp,
@@ -130,6 +147,7 @@ fn run(chain: Chain) {
         }
 
         // commit, holding the write lock for as little as possible
+        let included;
         {
             let mut state = chain.write();
             if state.head().hash != parent.hash {
@@ -138,14 +156,15 @@ fn run(chain: Chain) {
                 );
                 continue;
             }
+            included = transactions.len();
             block.transactions = transactions.iter().map(|tx| tx.hash).collect();
-            state.commit_block(execution.accounts, block, transactions, receipts);
+            state.commit_block(execution.accounts, execution.code, block, transactions, receipts);
         }
 
         tracing::info!(
             number,
             hash = %seal.hash,
-            txs = batch.len(),
+            txs = included,
             difficulty,
             nonce = seal.nonce,
             attempts = seal.attempts,
