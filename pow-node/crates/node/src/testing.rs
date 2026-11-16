@@ -60,6 +60,62 @@ pub fn sign_transfer_with(
     Ok(Bytes::from(encoded))
 }
 
+/// Signs an arbitrary transaction (including contract creation and calls with calldata).
+pub fn sign_tx(
+    private_key: &str,
+    to: Option<Address>,
+    value: U256,
+    nonce: u64,
+    gas_price: u128,
+    gas_limit: u64,
+    input: Bytes,
+) -> Result<Bytes, anyhow::Error> {
+    let signer: PrivateKeySigner = private_key.parse()?;
+
+    let kind = match to {
+        Some(addr) => TxKind::Call(addr),
+        None => TxKind::Create,
+    };
+
+    let tx = TxLegacy {
+        chain_id: Some(CHAIN_ID),
+        nonce,
+        gas_price,
+        gas_limit,
+        to: kind,
+        value,
+        input,
+    };
+
+    let signature = signer.sign_hash_sync(&tx.signature_hash())?;
+    let signed = tx.into_signed(signature);
+    let mut encoded = Vec::new();
+    signed.encode_2718(&mut encoded);
+
+    Ok(Bytes::from(encoded))
+}
+
+/// Signs a contract deployment transaction.
+pub fn sign_deployment(
+    private_key: &str,
+    initcode: Bytes,
+    nonce: u64,
+    gas_limit: u64,
+) -> Result<Bytes, anyhow::Error> {
+    sign_tx(private_key, None, U256::ZERO, nonce, GAS_PRICE, gas_limit, initcode)
+}
+
+/// Signs a contract call transaction.
+pub fn sign_call(
+    private_key: &str,
+    to: Address,
+    calldata: Bytes,
+    nonce: u64,
+    gas_limit: u64,
+) -> Result<Bytes, anyhow::Error> {
+    sign_tx(private_key, Some(to), U256::ZERO, nonce, GAS_PRICE, gas_limit, calldata)
+}
+
 /// The address a private key controls.
 pub fn address_of(private_key: &str) -> Result<Address, anyhow::Error> {
     let signer: PrivateKeySigner = private_key.parse()?;
