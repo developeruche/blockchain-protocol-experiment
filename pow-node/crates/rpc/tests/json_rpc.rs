@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use alloy::primitives::{Address, U256};
+use alloy::primitives::{Address, Bytes, U256};
 use jsonrpsee::{
     core::client::ClientT,
     http_client::{HttpClient, HttpClientBuilder},
@@ -8,7 +8,7 @@ use jsonrpsee::{
 };
 use node::{
     Chain, ChainConfig, miner,
-    testing::{DEV_PRIVATE_KEY, DEV_PRIVATE_KEY_1, address_of, one_eth, sign_transfer},
+    testing::{DEV_PRIVATE_KEY, DEV_PRIVATE_KEY_1, address_of, one_eth, sign_transfer, sign_deployment, sign_call},
 };
 use primitives::node::BreejaGenesis;
 use rpc::{RPCContext, start_server};
@@ -458,7 +458,7 @@ async fn eth_send_raw_transaction_rejects_what_the_node_cannot_execute() {
 }
 
 #[tokio::test]
-async fn eth_call_answers_transfers_and_refuses_anything_needing_the_evm() {
+async fn eth_call_executes_available_evm_and_returns_revert_error() {
     let harness = Harness::start(&[], false).await;
 
     // A call with no calldata invokes no code, so it returns no data.
@@ -486,8 +486,7 @@ async fn eth_call_answers_transfers_and_refuses_anything_needing_the_evm() {
         .unwrap();
     assert_eq!(result, "0x");
 
-    // Calldata would need an interpreter, so this is an honest error rather than a
-    // fabricated return value.
+    // Empty calldata to an EOA executes successfully and returns empty bytes.
     let result: Result<String, _> = harness
         .client
         .request(
@@ -498,12 +497,11 @@ async fn eth_call_answers_transfers_and_refuses_anything_needing_the_evm() {
             ],
         )
         .await;
-    let error = result.expect_err("a contract call must be refused");
-    assert!(error.to_string().contains("no EVM"), "got: {error}");
+    assert_eq!(result.unwrap(), "0x");
 }
 
 #[tokio::test]
-async fn eth_estimate_gas_returns_the_intrinsic_cost_of_a_transfer() {
+async fn eth_estimate_gas_finds_a_successful_limit_for_a_transfer() {
     let alice = address_of(DEV_PRIVATE_KEY).unwrap();
     let harness = Harness::start(&[(alice, one_eth() * U256::from(10u64))], false).await;
 
@@ -519,9 +517,9 @@ async fn eth_estimate_gas_returns_the_intrinsic_cost_of_a_transfer() {
         )
         .await
         .unwrap();
-    assert_eq!(estimate, "0x5208", "21000 gas");
+    assert_eq!(estimate, "0x5208");
 
-    // Contract creation has no `to` and needs the EVM.
+    // Contract creation is simulated by the EVM too; malformed initcode fails.
     let result: Result<String, _> = harness
         .client
         .request(
@@ -529,19 +527,133 @@ async fn eth_estimate_gas_returns_the_intrinsic_cost_of_a_transfer() {
             rpc_params![serde_json::json!({"from": alice, "data": "0x6080604052"})],
         )
         .await;
-    assert!(result.is_err());
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn contract_simulation_and_estimate_match_mined_execution() {
+    let alice = address_of(DEV_PRIVATE_KEY).unwrap();
+    let mut harness = Harness::start(&[(alice, one_eth() * U256::from(10))], false).await;
+    // Runtime stores 42 in slot zero and returns it as a word.
+    let init = Bytes::from_static(&[0x60,0x16,0x60,0x0c,0x60,0x00,0x39,0x60,0x16,0x60,0x00,0xf3,
+        0x60,0x2a,0x60,0x00,0x55,0x60,0x2a,0x60,0x00,0x60,0x00,0xa1,
+        0x60,0x2a,0x60,0x00,0x52,0x60,0x20,0x60,0x00,0xf3]);
+    let deploy = sign_deployment(DEV_PRIVATE_KEY, init, 0, 100_000).unwrap();
+    let deploy_hash = harness.chain.submit_raw_transaction(&deploy).unwrap();
+    harness.miner = Some(miner::spawn(harness.chain.clone()));
+    harness.wait_for("deployment", |c| c.read().get_receipt(&deploy_hash).is_some()).await;
+    let contract = harness.chain.read().get_receipt(&deploy_hash).unwrap().contract_address.unwrap();
+    let request = serde_json::json!({"from": alice, "to": contract});
+    let output: String = harness.client.request("eth_call", rpc_params![request.clone(), "latest"]).await.unwrap();
+    assert_eq!(output, format!("0x{:064x}", 42));
+    assert_eq!(harness.chain.read().get_storage_at(&contract, &U256::ZERO), U256::ZERO);
+    let estimate: String = harness.client.request("eth_estimateGas", rpc_params![request]).await.unwrap();
+    let gas = from_quantity(&estimate) as u64;
+    assert!(gas > 21_000);
+    let raw = sign_call(DEV_PRIVATE_KEY, contract, Bytes::new(), 1, gas).unwrap();
+    let hash = harness.chain.submit_raw_transaction(&raw).unwrap();
+    harness.wait_for("estimated call", |c| c.read().get_receipt(&hash).is_some()).await;
+    {
+        let state = harness.chain.read();
+        assert_eq!(state.get_receipt(&hash).unwrap().status, 1);
+        assert_eq!(state.get_storage_at(&contract, &U256::ZERO), U256::from(42));
+    }
+    let code: String = harness.client.request("eth_getCode", rpc_params![contract, "latest"]).await.unwrap();
+    assert!(code.len() > 2);
+    let old_code: String = harness.client.request("eth_getCode", rpc_params![contract, "earliest"]).await.unwrap();
+    assert_eq!(old_code, "0x");
+    let storage: String = harness.client.request("eth_getStorageAt", rpc_params![contract, "0x0", "latest"]).await.unwrap();
+    assert_eq!(storage, format!("0x{:064x}", 42));
+    let topic = format!("0x{:064x}", 42);
+    let logs: Vec<Value> = harness.client.request("eth_getLogs", rpc_params![serde_json::json!({"fromBlock":"0x0", "toBlock":"latest", "address":contract, "topics":[topic]})]).await.unwrap();
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0]["transactionHash"], format!("{hash}"));
+    let missing: Vec<Value> = harness.client.request("eth_getLogs", rpc_params![serde_json::json!({"fromBlock":"0x0", "address":Address::ZERO})]).await.unwrap();
+    assert!(missing.is_empty());
+}
+
+#[tokio::test]
+async fn pending_call_sees_queued_contract_deployment() {
+    let alice = address_of(DEV_PRIVATE_KEY).unwrap();
+    let harness = Harness::start(&[(alice, one_eth() * U256::from(10))], false).await;
+    let init = Bytes::from_static(&[0x60,0x0a,0x60,0x0c,0x60,0x00,0x39,0x60,0x0a,0x60,0x00,0xf3,
+        0x60,0x2a,0x60,0x00,0x52,0x60,0x20,0x60,0x00,0xf3]);
+    let raw = sign_deployment(DEV_PRIVATE_KEY, init, 0, 100_000).unwrap();
+    harness.chain.submit_raw_transaction(&raw).unwrap();
+    let contract = alice.create(0);
+    let request = serde_json::json!({"to": contract});
+    let latest: String = harness.client.request("eth_call", rpc_params![request.clone(), "latest"]).await.unwrap();
+    let pending: String = harness.client.request("eth_call", rpc_params![request, "pending"]).await.unwrap();
+    assert_eq!(latest, "0x");
+    assert_eq!(pending, format!("0x{:064x}", 42));
+    assert!(harness.chain.read().get_code(&contract).is_empty());
 }
 
 #[tokio::test]
 async fn an_unsupported_method_gets_the_standard_method_not_found_error() {
     let harness = Harness::start(&[], false).await;
 
-    // `eth_gasPrice` is a real Ethereum method this node does not implement, so it
-    // must come back as -32601 rather than something invented.
+    // `eth_gasPrice` is now supported for transaction tooling.
+    let price: String = harness.client.request("eth_gasPrice", rpc_params![]).await.unwrap();
+    assert_eq!(from_quantity(&price), primitives::constants::GAS_PRICE);
     let result: Result<Value, _> = harness.client.request("eth_gasPrice", rpc_params![]).await;
+    assert!(result.is_ok());
+    let result: Result<Value, _> = harness.client.request("eth_nonexistent", rpc_params![]).await;
     let error = result.expect_err("an unregistered method must be an error");
     assert!(
         error.to_string().contains("Method not found") || error.to_string().contains("-32601"),
         "got: {error}"
     );
+}
+
+/// Real clients (cast, alloy, ethers) parse responses into strict typed structs.
+/// This deploys the Solidity demo and checks every response round-trips through
+/// alloy's own RPC types, so a malformed field fails here rather than in a wallet.
+#[tokio::test]
+async fn responses_parse_as_alloy_rpc_types() {
+    let alice = address_of(DEV_PRIVATE_KEY).unwrap();
+    let mut harness = Harness::start(&[(alice, one_eth() * U256::from(10))], false).await;
+    let code: Bytes = include_str!("../../../demo/Counter.bytecode").trim().parse().unwrap();
+    let deploy = sign_deployment(DEV_PRIVATE_KEY, code, 0, 500_000).unwrap();
+    let deploy_hash = harness.chain.submit_raw_transaction(&deploy).unwrap();
+    harness.miner = Some(miner::spawn(harness.chain.clone()));
+    harness.wait_for("deployment", |c| c.read().get_receipt(&deploy_hash).is_some()).await;
+    let contract = harness.chain.read().get_receipt(&deploy_hash).unwrap().contract_address.unwrap();
+
+    let mut calldata = alloy::primitives::keccak256("set(uint256)")[..4].to_vec();
+    calldata.extend_from_slice(&U256::from(42).to_be_bytes::<32>());
+    let call = sign_call(DEV_PRIVATE_KEY, contract, Bytes::from(calldata), 1, 100_000).unwrap();
+    let call_hash = harness.chain.submit_raw_transaction(&call).unwrap();
+    harness.wait_for("set(42)", |c| c.read().get_receipt(&call_hash).is_some()).await;
+
+    // A deployment has no recipient: `to` must be JSON null, not the string "null".
+    let raw: Value = harness.client.request("eth_getTransactionReceipt", rpc_params![deploy_hash]).await.unwrap();
+    assert!(raw["to"].is_null());
+    let receipt: alloy::rpc::types::TransactionReceipt = serde_json::from_value(raw).unwrap();
+    assert_eq!(receipt.to, None);
+    assert_eq!(receipt.contract_address, Some(contract));
+
+    let raw: Value = harness.client.request("eth_getTransactionByHash", rpc_params![deploy_hash]).await.unwrap();
+    assert!(raw["to"].is_null());
+    serde_json::from_value::<alloy::rpc::types::Transaction>(raw).unwrap();
+
+    // The event emitted by set(42) appears in the receipt, and in the bloom.
+    let raw: Value = harness.client.request("eth_getTransactionReceipt", rpc_params![call_hash]).await.unwrap();
+    let receipt: alloy::rpc::types::TransactionReceipt = serde_json::from_value(raw).unwrap();
+    let logs = receipt.inner.logs();
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].address(), contract);
+    assert_eq!(logs[0].topics()[0], alloy::primitives::keccak256("Updated(uint256)"));
+    assert_eq!(U256::from_be_slice(&logs[0].data().data), U256::from(42));
+    assert_eq!(logs[0].log_index, Some(0));
+    assert!(receipt.inner.logs_bloom().contains_input(alloy::primitives::BloomInput::Raw(contract.as_slice())));
+
+    // Blocks, including the one holding the event, parse with full transactions.
+    let block: Value = harness
+        .client
+        .request("eth_getBlockByNumber", rpc_params![format!("{:#x}", receipt.block_number.unwrap()), true])
+        .await
+        .unwrap();
+    let block: alloy::rpc::types::Block = serde_json::from_value(block).unwrap();
+    assert!(block.header.logs_bloom.contains_input(alloy::primitives::BloomInput::Raw(contract.as_slice())));
 }

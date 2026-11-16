@@ -9,15 +9,56 @@ use crate::constants::{
     MIN_DIFFICULTY_LEADING_ZEROS, TRANSFER_GAS,
 };
 
-/// An externally owned account: Ethereum's account record, minus everything a
-/// contract would need.
+/// The key type for a contract storage slot (EVM U256 storage index).
+pub type StorageKey = U256;
+
+/// The value type for a contract storage slot (EVM U256 storage value).
+pub type StorageValue = U256;
+
+/// A log entry emitted by a contract via a `LOGn` opcode.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Log {
+    /// The contract that emitted this log.
+    pub address: Address,
+    /// Up to four 32-byte indexed topics.
+    pub topics: Vec<B256>,
+    /// Non-indexed data payload.
+    pub data: Bytes,
+}
+
+/// An Ethereum account with full contract support.
+///
+/// `storage_root` and `code_hash` were always present in the struct (Ethereum's
+/// account encoding has had four fields since genesis); we now actually populate
+/// them. `code` holds the runtime bytecode for a contract account; `storage` holds
+/// every written slot. EOAs leave both empty.
+///
+/// # RLP encoding note
+///
+/// Only the four canonical fields (`nonce`, `balance`, `storage_root`,
+/// `code_hash`) are RLP-encoded for the state root; `code` and `storage` are
+/// derivable from them and are not part of the wire format.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, RlpEncodable)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     pub nonce: u64,
     pub balance: U256,
+    /// Keccak-256 of the RLP-encoded storage trie root. We approximate this as
+    /// `keccak256(rlp(sorted storage slots))` — good enough for a teaching node
+    /// to commit to storage changes in the state root.
     pub storage_root: B256,
+    /// Keccak-256 of the runtime bytecode. `EMPTY_CODE_HASH` for an EOA.
     pub code_hash: B256,
+    /// Runtime bytecode. `None` for EOAs; `Some(bytes)` for contract accounts.
+    /// Not RLP-encoded — derived from `code_hash` via the `BreejaDb` code map.
+    #[rlp(skip)]
+    pub code: Option<Bytes>,
+    /// Contract storage: slot index → value. Only slots that have been written
+    /// are present; absent slots read as zero (Ethereum semantics).
+    /// Not RLP-encoded — committed to via `storage_root`.
+    #[rlp(skip)]
+    pub storage: HashMap<StorageKey, StorageValue>,
 }
 
 /// A sealed block.
@@ -75,8 +116,8 @@ pub struct BlockHeader {
 
 /// A transaction that has been included in a block.
 ///
-/// `input` is always empty: Breeja rejects anything with calldata, because it
-/// has no EVM to run it with.
+/// `to` is `None` for contract-creation transactions; `Some(address)` for calls
+/// and plain transfers. `input` carries calldata (or init-code for creation).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Transaction {
@@ -86,11 +127,13 @@ pub struct Transaction {
     pub transaction_index: u64,
     pub chain_id: u64,
     pub from: Address,
-    pub to: Address,
+    /// `None` for contract-creation; `Some` for calls/transfers.
+    pub to: Option<Address>,
     pub value: U256,
     pub nonce: u64,
     pub gas: u64,
     pub gas_price: u128,
+    /// Calldata for a call, or initcode for a creation. Empty for plain transfers.
     pub input: Bytes,
     pub v: u64,
     pub r: U256,
@@ -106,13 +149,18 @@ pub struct TransactionReceipt {
     pub block_hash: B256,
     pub block_number: u64,
     pub from: Address,
-    pub to: Address,
+    /// `None` for contract-creation; `Some` for calls/transfers.
+    pub to: Option<Address>,
     pub gas_used: u64,
-    pub cummulative_gas_used: u64,
+    pub cumulative_gas_used: u64,
     pub effective_gas_price: u128,
-    /// `1` for success. Breeja only ever includes transactions it has already
-    /// validated, so a receipt is never a failure.
+    /// `1` for success, `0` for a reverted or halted transaction. Both are
+    /// mined — only invalid transactions are excluded from blocks entirely.
     pub status: u8,
+    /// Populated for contract-creation transactions; `None` otherwise.
+    pub contract_address: Option<Address>,
+    /// Logs emitted by this transaction.
+    pub logs: Vec<Log>,
 }
 
 /// A transaction that has been accepted into the mempool but not yet mined.
@@ -120,12 +168,15 @@ pub struct TransactionReceipt {
 pub struct PendingTransaction {
     pub hash: B256,
     pub from: Address,
-    pub to: Address,
+    /// `None` for contract-creation; `Some` for calls/transfers.
+    pub to: Option<Address>,
     pub value: U256,
     pub nonce: u64,
     pub gas: u64,
     pub gas_price: u128,
     pub chain_id: u64,
+    /// Calldata for a call, or initcode for a creation. Empty for plain transfers.
+    pub input: Bytes,
     pub v: u64,
     pub r: U256,
     pub s: U256,
@@ -417,6 +468,28 @@ impl BlockState {
             .map(|snapshot| snapshot.get(address).cloned().unwrap_or_default())
     }
 
+    /// Full account snapshot after block `number`, for read-only EVM simulation.
+    pub fn accounts_at(&self, number: u64) -> Option<HashMap<Address, Account>> {
+        self.state_history.get(number as usize).cloned()
+    }
+
+    /// Runtime bytecode at the chain head. Returns empty `Bytes` for EOAs.
+    pub fn get_code(&self, address: &Address) -> Bytes {
+        self.accounts
+            .get(address)
+            .and_then(|a| a.code.clone())
+            .unwrap_or_default()
+    }
+
+    /// Value of a single storage slot at the chain head. Returns zero for
+    /// uninitialised slots, matching EVM semantics.
+    pub fn get_storage_at(&self, address: &Address, slot: &StorageKey) -> StorageValue {
+        self.accounts
+            .get(address)
+            .and_then(|a| a.storage.get(slot).copied())
+            .unwrap_or_default()
+    }
+
     /// The nonce the sender's *next* transaction must carry: the mined nonce plus
     /// anything already sitting in the mempool for that sender.
     pub fn get_pending_nonce(&self, address: &Address) -> u64 {
@@ -614,12 +687,13 @@ mod tests {
         state.add_to_mempool(PendingTransaction {
             hash: B256::repeat_byte(0xaa),
             from: sender,
-            to: Address::repeat_byte(0x22),
+            to: Some(Address::repeat_byte(0x22)),
             value: one_eth,
             nonce: 0,
             gas: TRANSFER_GAS,
             gas_price: GAS_PRICE,
             chain_id: 1,
+            input: Bytes::new(),
             v: 0,
             r: U256::ZERO,
             s: U256::ZERO,

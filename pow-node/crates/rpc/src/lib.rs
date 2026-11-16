@@ -88,6 +88,11 @@ pub async fn start_server(
         estimate_gas_handler(params, context)
     })?;
 
+    module.register_method("eth_gasPrice", |_, _, _| primitives::response::quantity(primitives::constants::GAS_PRICE))?;
+    module.register_method("eth_getCode", |params, context, _| handlers::get_code_handler(params, context))?;
+    module.register_method("eth_getStorageAt", |params, context, _| handlers::get_storage_handler(params, context))?;
+    module.register_method("eth_getLogs", |params, context, _| handlers::get_logs_handler(params, context))?;
+
     tracing::info!(
         address = %bound,
         methods = module.method_names().count(),

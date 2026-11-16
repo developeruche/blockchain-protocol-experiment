@@ -2,11 +2,12 @@
 
 use std::time::{Duration, Instant};
 
-use alloy::primitives::{Address, B256, U256};
+use alloy::primitives::{Address, B256, Bytes, U256};
 use node::{
     Chain, ChainConfig, miner,
     testing::{
-        DEV_PRIVATE_KEY, DEV_PRIVATE_KEY_1, address_of, one_eth, sign_transfer, sign_transfer_with,
+        DEV_PRIVATE_KEY, DEV_PRIVATE_KEY_1, address_of, one_eth, sign_call, sign_deployment,
+        sign_transfer, sign_transfer_with,
     },
 };
 use primitives::{
@@ -84,7 +85,8 @@ fn a_signed_transfer_is_mined_and_moves_the_eth() {
     assert_eq!(state.mempool_len(), 0);
     let tx = state.get_transaction(&tx_hash).unwrap();
     assert_eq!(tx.from, alice);
-    assert_eq!(tx.to, bob);
+    // `to` is now `Option<Address>` to support contract deployments (`TxKind::Create`).
+    assert_eq!(tx.to, Some(bob));
     assert_eq!(tx.value, one_eth() * U256::from(5u64));
 
     // The block it landed in lists it.
@@ -313,5 +315,211 @@ fn a_new_transaction_makes_the_miner_rebuild_its_candidate_block() {
         chain.read().get_account(&bob).balance,
         one_eth(),
         "a transaction submitted while mining was already underway still got mined"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Milestone 3: Contracts Integration Tests
+// ---------------------------------------------------------------------------
+
+const M3_INITCODE: &[u8] = &[
+    0x60, 0x0b, 0x60, 0x0c, 0x60, 0x00, 0x39, 0x60, 0x0b, 0x60, 0x00, 0xf3, // initcode header
+    0x60, 0x2a, 0x60, 0x00, 0x55, 0x60, 0x00, 0x60, 0x00, 0xa0, 0x00, // runtime
+];
+
+const M3_RUNTIME: &[u8] = &[
+    0x60, 0x2a, 0x60, 0x00, 0x55, // PUSH1 42, PUSH1 0, SSTORE -> storage[0] = 42
+    0x60, 0x00, 0x60, 0x00, 0xa0, // PUSH1 0,  PUSH1 0, LOG0   -> emits an empty log
+    0x00, // STOP
+];
+
+#[test]
+fn deploy_contract_commits_code_and_receipt_has_contract_address() {
+    let alice = address_of(DEV_PRIVATE_KEY).unwrap();
+    let chain = test_chain(&[(alice, one_eth() * U256::from(100u64))]);
+
+    let raw = sign_deployment(
+        DEV_PRIVATE_KEY,
+        Bytes::copy_from_slice(M3_INITCODE),
+        0,
+        100_000,
+    )
+    .unwrap();
+    let tx_hash = chain.submit_raw_transaction(&raw).unwrap();
+
+    let handle = miner::spawn(chain.clone());
+    wait_for(Duration::from_secs(10), "deployment to be mined", || {
+        chain.read().get_receipt(&tx_hash).is_some()
+    });
+    chain.shutdown();
+    handle.join().unwrap();
+
+    let state = chain.read();
+    let receipt = state.get_receipt(&tx_hash).unwrap();
+    assert_eq!(receipt.status, 1, "deployment should succeed");
+    assert!(
+        receipt.contract_address.is_some(),
+        "contract deployment receipt must contain contract_address"
+    );
+
+    let contract_addr = receipt.contract_address.unwrap();
+    let code = state.get_code(&contract_addr);
+    assert_eq!(
+        code.as_ref(),
+        M3_RUNTIME,
+        "runtime code must be committed to state at the created address"
+    );
+}
+
+#[test]
+fn call_contract_updates_storage_and_emits_log() {
+    let alice = address_of(DEV_PRIVATE_KEY).unwrap();
+    let chain = test_chain(&[(alice, one_eth() * U256::from(100u64))]);
+
+    // 1. Deploy the contract
+    let deploy_raw = sign_deployment(
+        DEV_PRIVATE_KEY,
+        Bytes::copy_from_slice(M3_INITCODE),
+        0,
+        100_000,
+    )
+    .unwrap();
+    let deploy_hash = chain.submit_raw_transaction(&deploy_raw).unwrap();
+
+    let handle = miner::spawn(chain.clone());
+    wait_for(Duration::from_secs(10), "deployment to be mined", || {
+        chain.read().get_receipt(&deploy_hash).is_some()
+    });
+
+    let contract_addr = chain
+        .read()
+        .get_receipt(&deploy_hash)
+        .unwrap()
+        .contract_address
+        .unwrap();
+
+    // Verify slot 0 is initially 0
+    assert_eq!(
+        chain.read().get_storage_at(&contract_addr, &U256::ZERO),
+        U256::ZERO
+    );
+
+    // 2. Call the contract
+    let call_raw = sign_call(DEV_PRIVATE_KEY, contract_addr, Bytes::new(), 1, 100_000).unwrap();
+    let call_hash = chain.submit_raw_transaction(&call_raw).unwrap();
+
+    wait_for(Duration::from_secs(10), "call to be mined", || {
+        chain.read().get_receipt(&call_hash).is_some()
+    });
+    chain.shutdown();
+    handle.join().unwrap();
+
+    let state = chain.read();
+    let call_receipt = state.get_receipt(&call_hash).unwrap();
+    assert_eq!(call_receipt.status, 1, "call should succeed");
+
+    // Assert storage slot 0 was updated to 42
+    assert_eq!(
+        state.get_storage_at(&contract_addr, &U256::ZERO),
+        U256::from(42u64),
+        "storage[0] must be updated to 42 by contract call"
+    );
+
+    // Assert log was emitted
+    assert_eq!(call_receipt.logs.len(), 1, "one log must be emitted");
+    assert_eq!(call_receipt.logs[0].address, contract_addr);
+    assert!(call_receipt.logs[0].topics.is_empty());
+}
+
+/// Deploy and call the Solidity counter compiled from demo/Counter.sol.
+#[test]
+fn solidity_counter_demo() {
+    let alice = address_of(DEV_PRIVATE_KEY).unwrap();
+    let chain = test_chain(&[(alice, one_eth() * U256::from(100u64))]);
+    let code: Bytes = include_str!("../../../demo/Counter.bytecode").trim().parse().unwrap();
+    let deploy = sign_deployment(DEV_PRIVATE_KEY, code, 0, 500_000).unwrap();
+    let deploy_hash = chain.submit_raw_transaction(&deploy).unwrap();
+    let handle = miner::spawn(chain.clone());
+    wait_for(Duration::from_secs(10), "Solidity deployment", || chain.read().get_receipt(&deploy_hash).is_some());
+    let address = chain.read().get_receipt(&deploy_hash).unwrap().contract_address.unwrap();
+    let mut calldata = alloy::primitives::keccak256("set(uint256)")[..4].to_vec();
+    calldata.extend_from_slice(&U256::from(42).to_be_bytes::<32>());
+    let call = sign_call(DEV_PRIVATE_KEY, address, Bytes::from(calldata), 1, 100_000).unwrap();
+    let call_hash = chain.submit_raw_transaction(&call).unwrap();
+    wait_for(Duration::from_secs(10), "Solidity call", || chain.read().get_receipt(&call_hash).is_some());
+    chain.shutdown();
+    handle.join().unwrap();
+    let state = chain.read();
+    let receipt = state.get_receipt(&call_hash).unwrap();
+    assert_eq!(receipt.status, 1);
+    assert_eq!(state.get_storage_at(&address, &U256::ZERO), U256::from(42));
+    assert_eq!(receipt.logs.len(), 1);
+    assert_eq!(receipt.logs[0].topics[0], alloy::primitives::keccak256("Updated(uint256)"));
+}
+
+#[test]
+fn reverting_transaction_is_mined_with_status_zero_and_charges_gas() {
+    let alice = address_of(DEV_PRIVATE_KEY).unwrap();
+    let chain = test_chain(&[(alice, one_eth() * U256::from(100u64))]);
+
+    // Deploy a contract that unconditionally reverts: PUSH1 0, PUSH1 0, REVERT (60006000fd)
+    let revert_initcode = &[
+        0x60, 0x05, 0x60, 0x0c, 0x60, 0x00, 0x39, 0x60, 0x05, 0x60, 0x00, 0xf3, // initcode header (5 bytes runtime)
+        0x60, 0x00, 0x60, 0x00, 0xfd, // PUSH1 0, PUSH1 0, REVERT
+    ];
+
+    let deploy_raw = sign_deployment(
+        DEV_PRIVATE_KEY,
+        Bytes::copy_from_slice(revert_initcode),
+        0,
+        100_000,
+    )
+    .unwrap();
+    let deploy_hash = chain.submit_raw_transaction(&deploy_raw).unwrap();
+
+    let handle = miner::spawn(chain.clone());
+    wait_for(Duration::from_secs(10), "deployment to be mined", || {
+        chain.read().get_receipt(&deploy_hash).is_some()
+    });
+
+    let contract_addr = chain
+        .read()
+        .get_receipt(&deploy_hash)
+        .unwrap()
+        .contract_address
+        .unwrap();
+
+    let balance_before = chain.read().get_account(&alice).balance;
+
+    // Call the reverting contract
+    let call_raw = sign_call(DEV_PRIVATE_KEY, contract_addr, Bytes::new(), 1, 50_000).unwrap();
+    let call_hash = chain.submit_raw_transaction(&call_raw).unwrap();
+
+    wait_for(Duration::from_secs(10), "reverting call to be mined", || {
+        chain.read().get_receipt(&call_hash).is_some()
+    });
+    chain.shutdown();
+    handle.join().unwrap();
+
+    let state = chain.read();
+    let receipt = state.get_receipt(&call_hash).unwrap();
+
+    // Must be mined with status 0
+    assert_eq!(receipt.status, 0, "reverted transaction must have status 0");
+    assert!(receipt.gas_used > 0, "reverted transaction must burn gas");
+
+    // Sender's nonce must have advanced to 2
+    assert_eq!(
+        state.get_account(&alice).nonce,
+        2,
+        "sender nonce must advance even after revert"
+    );
+
+    // Sender must have been debited for gas burned
+    let gas_cost = U256::from(receipt.gas_used) * U256::from(receipt.effective_gas_price);
+    assert_eq!(
+        state.get_account(&alice).balance,
+        balance_before - gas_cost,
+        "sender must be charged for burned gas on revert"
     );
 }

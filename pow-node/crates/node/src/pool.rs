@@ -7,17 +7,40 @@ use primitives::{
     node::{BlockState, PendingTransaction},
 };
 
+/// Calculates the intrinsic gas cost of a transaction:
+/// - 21,000 base cost
+/// - 4 gas per zero byte of calldata/initcode
+/// - 16 gas per non-zero byte of calldata/initcode
+/// - 32,000 additional gas for contract creation (TxKind::Create)
+pub fn calculate_intrinsic_gas(input: &[u8], is_create: bool) -> u64 {
+    let mut gas = TRANSFER_GAS;
+    if is_create {
+        gas += 32_000;
+    }
+    for &byte in input {
+        if byte == 0 {
+            gas += 4;
+        } else {
+            gas += 16;
+        }
+    }
+    gas
+}
+
 /// A signed transaction that has been decoded and checked against the protocol
 /// rules, but not yet against chain state.
 struct DecodedTransaction {
     hash: B256,
     from: Address,
-    to: Address,
+    /// `None` for contract creation (`TxKind::Create`).
+    to: Option<Address>,
     value: U256,
     nonce: u64,
     gas: u64,
     gas_price: u128,
     chain_id: u64,
+    #[allow(dead_code)]
+    input: Bytes,
     v: u64,
     r: U256,
     s: U256,
@@ -59,27 +82,19 @@ fn decode_and_check(raw: &Bytes) -> Result<DecodedTransaction, anyhow::Error> {
         None => CHAIN_ID,
     };
 
-    // No EVM means no contract creation.
     let to = match envelope.kind() {
-        TxKind::Call(to) => to,
-        TxKind::Create => anyhow::bail!(
-            "contract creation is not supported: this node has no EVM and only \
-             processes ETH transfers"
-        ),
+        TxKind::Call(to) => Some(to),
+        TxKind::Create => None,
     };
 
-    // ...and no contract calls either. Calldata would need an interpreter.
-    if !envelope.input().is_empty() {
-        anyhow::bail!(
-            "transaction carries {} bytes of calldata: this node has no EVM and \
-             only processes plain ETH transfers",
-            envelope.input().len()
-        );
-    }
+    let input = envelope.input().clone();
+    let intrinsic_gas = calculate_intrinsic_gas(&input, to.is_none());
 
     let gas = envelope.gas_limit();
-    if gas < TRANSFER_GAS {
-        anyhow::bail!("gas limit {gas} is below the intrinsic cost of a transfer ({TRANSFER_GAS})");
+    if gas < intrinsic_gas {
+        anyhow::bail!(
+            "gas limit {gas} is below the intrinsic cost ({intrinsic_gas})"
+        );
     }
 
     let gas_price = envelope.max_fee_per_gas();
@@ -97,6 +112,7 @@ fn decode_and_check(raw: &Bytes) -> Result<DecodedTransaction, anyhow::Error> {
         gas,
         gas_price,
         chain_id,
+        input,
         v: legacy_v(signature.v(), envelope.chain_id()),
         r: signature.r(),
         s: signature.s(),
@@ -166,6 +182,7 @@ pub fn admit(state: &mut BlockState, raw: &Bytes) -> Result<B256, anyhow::Error>
         gas: tx.gas,
         gas_price: tx.gas_price,
         chain_id: tx.chain_id,
+        input: tx.input,
         v: tx.v,
         r: tx.r,
         s: tx.s,

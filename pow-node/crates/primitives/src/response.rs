@@ -1,11 +1,14 @@
 use std::fmt::LowerHex;
 
-use alloy::primitives::{Address, B256, Bytes};
+use alloy::{
+    consensus::EMPTY_OMMER_ROOT_HASH,
+    primitives::{Address, B256, Bloom, Bytes},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     constants::{EXTRA_DATA, TRANSFER_GAS},
-    node::{Block, Transaction, TransactionReceipt},
+    node::{Block, Log, Transaction, TransactionReceipt},
 };
 
 /// Encodes a number as an Ethereum *quantity*: minimal hex, `0x0` for zero.
@@ -48,6 +51,13 @@ pub struct BlockResponse {
     #[serde(rename = "transactionsRoot")]
     pub transaction_root: String,
     pub receipts_root: String,
+    /// Hash of the block's uncle list. Breeja never includes uncles, so this is
+    /// always the hash of an empty list.
+    pub sha3_uncles: String,
+    /// Union of every receipt's bloom filter in the block.
+    pub logs_bloom: String,
+    /// Ethash's second proof-of-work output. Breeja's PoW has none, so zero.
+    pub mix_hash: String,
     pub difficulty: String,
     pub total_difficulty: String,
     pub timestamp: String,
@@ -60,6 +70,8 @@ pub struct BlockResponse {
     /// Transaction hashes, or full transaction objects when the caller asked for
     /// them with the `fullTransactions` flag.
     pub transactions: Vec<serde_json::Value>,
+    /// Always empty: Breeja never includes uncle blocks.
+    pub uncles: Vec<String>,
 }
 
 /// A transaction, as `eth_getTransactionByHash` returns it.
@@ -72,7 +84,8 @@ pub struct TransactionResponse {
     pub transaction_index: String,
     pub chain_id: String,
     pub from: String,
-    pub to: String,
+    /// `None` (JSON `null`) for a contract-creation transaction.
+    pub to: Option<String>,
     pub value: String,
     pub nonce: String,
     pub gas: String,
@@ -95,19 +108,46 @@ pub struct TransactionReceiptResponse {
     pub block_hash: String,
     pub block_number: String,
     pub from: String,
-    pub to: String,
+    /// `None` (JSON `null`) for a contract-creation transaction.
+    pub to: Option<String>,
     pub gas_used: String,
-    pub cummulative_gas_used: String,
+    pub cumulative_gas_used: String,
     pub effective_gas_price: String,
-    /// Always `null`: deploying a contract needs an EVM, so Breeja rejects it.
+    /// The new contract's address for a contract-creation transaction.
     pub contract_address: Option<String>,
-    /// Always empty: logs are emitted by the `LOG*` opcodes, and there is no EVM
-    /// to execute them.
-    pub logs: Vec<serde_json::Value>,
+    /// Events emitted by the `LOG*` opcodes during execution.
+    pub logs: Vec<LogResponse>,
     pub logs_bloom: String,
     pub status: String,
     #[serde(rename = "type")]
     pub tx_type: String,
+}
+
+/// A log, as it appears inside a receipt.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogResponse {
+    pub address: String,
+    pub topics: Vec<String>,
+    pub data: String,
+    pub block_hash: String,
+    pub block_number: String,
+    pub transaction_hash: String,
+    pub transaction_index: String,
+    /// Position of this log among *all* logs in the block, not just this receipt.
+    pub log_index: String,
+    /// Only ever `true` for a log undone by a chain reorganization.
+    pub removed: bool,
+}
+
+/// Builds the 2048-bit bloom filter for a set of logs: a compact summary that lets
+/// clients skip blocks that certainly do not contain an address or topic.
+pub fn logs_bloom(logs: &[Log]) -> Bloom {
+    let mut bloom = Bloom::ZERO;
+    for log in logs {
+        bloom.accrue_raw_log(log.address, &log.topics);
+    }
+    bloom
 }
 
 impl BlockResponse {
@@ -115,7 +155,11 @@ impl BlockResponse {
     ///
     /// `transactions` is supplied by the caller because `eth_getBlockBy*` takes a
     /// flag choosing between bare hashes and full transaction objects.
-    pub fn from_block(block: &Block, transactions: Vec<serde_json::Value>) -> Self {
+    pub fn from_block(
+        block: &Block,
+        transactions: Vec<serde_json::Value>,
+        logs_bloom: Bloom,
+    ) -> Self {
         Self {
             number: quantity(block.number),
             hash: data_hash(&block.hash),
@@ -123,6 +167,9 @@ impl BlockResponse {
             state_root: data_hash(&block.state_root),
             transaction_root: data_hash(&block.transaction_root),
             receipts_root: data_hash(&block.receipts_root),
+            sha3_uncles: data_hash(&EMPTY_OMMER_ROOT_HASH),
+            logs_bloom: format!("{logs_bloom:#x}"),
+            mix_hash: data_hash(&B256::ZERO),
             difficulty: quantity(block.difficulty),
             total_difficulty: quantity(block.total_difficulty),
             timestamp: quantity(block.timestamp),
@@ -133,6 +180,7 @@ impl BlockResponse {
             nonce: data_u64(block.nonce),
             size: quantity(block_size(block)),
             transactions,
+            uncles: Vec::new(),
         }
     }
 }
@@ -146,7 +194,7 @@ impl From<&Transaction> for TransactionResponse {
             transaction_index: quantity(tx.transaction_index),
             chain_id: quantity(tx.chain_id),
             from: data_address(&tx.from),
-            to: data_address(&tx.to),
+            to: tx.to.as_ref().map(data_address),
             value: quantity(tx.value),
             nonce: quantity(tx.nonce),
             gas: quantity(tx.gas),
@@ -160,22 +208,42 @@ impl From<&Transaction> for TransactionResponse {
     }
 }
 
-impl From<&TransactionReceipt> for TransactionReceiptResponse {
-    fn from(receipt: &TransactionReceipt) -> Self {
+impl TransactionReceiptResponse {
+    /// Converts a stored receipt into its JSON-RPC form.
+    ///
+    /// `first_log_index` is the number of logs emitted by earlier transactions in
+    /// the same block, because a log's `logIndex` counts across the whole block.
+    pub fn from_receipt(receipt: &TransactionReceipt, first_log_index: u64) -> Self {
+        let logs = receipt
+            .logs
+            .iter()
+            .enumerate()
+            .map(|(i, log)| LogResponse {
+                address: data_address(&log.address),
+                topics: log.topics.iter().map(data_hash).collect(),
+                data: data_bytes(&log.data),
+                block_hash: data_hash(&receipt.block_hash),
+                block_number: quantity(receipt.block_number),
+                transaction_hash: data_hash(&receipt.transaction_hash),
+                transaction_index: quantity(receipt.transaction_index),
+                log_index: quantity(first_log_index + i as u64),
+                removed: false,
+            })
+            .collect();
+
         Self {
             transaction_hash: data_hash(&receipt.transaction_hash),
             transaction_index: quantity(receipt.transaction_index),
             block_hash: data_hash(&receipt.block_hash),
             block_number: quantity(receipt.block_number),
             from: data_address(&receipt.from),
-            to: data_address(&receipt.to),
+            to: receipt.to.as_ref().map(data_address),
             gas_used: quantity(receipt.gas_used),
-            cummulative_gas_used: quantity(receipt.cummulative_gas_used),
+            cumulative_gas_used: quantity(receipt.cumulative_gas_used),
             effective_gas_price: quantity(receipt.effective_gas_price),
-            contract_address: None,
-            logs: Vec::new(),
-            // A bloom filter over no logs is 256 zero bytes.
-            logs_bloom: format!("0x{}", "00".repeat(256)),
+            contract_address: receipt.contract_address.as_ref().map(data_address),
+            logs,
+            logs_bloom: format!("{:#x}", logs_bloom(&receipt.logs)),
             status: quantity(receipt.status),
             tx_type: "0x0".to_owned(),
         }

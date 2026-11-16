@@ -1,0 +1,5 @@
+[profile.default]
+src = "."
+out = "out"
+solc_version = "0.8.26"
+evm_version = "shanghai"
